@@ -241,9 +241,18 @@ pub fn port_conflict(docker_error: &str, creating: bool) -> Option<String> {
     })
 }
 
+/// A start that failed because Docker could not publish a port.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct PortConflict(String);
+
+/// Turns Docker's refusal to publish a taken port (a server error) into a [`PortConflict`] message.
 fn explain_start_error(error: anyhow::Error, creating: bool) -> anyhow::Error {
+    if !has_status(&error, 500) {
+        return error;
+    }
     match port_conflict(&format!("{error:#}"), creating) {
-        Some(message) => anyhow!(message),
+        Some(message) => anyhow::Error::new(PortConflict(message)),
         None => error,
     }
 }
@@ -429,29 +438,30 @@ impl Docked {
             self.docker.create_container(Some(options), body),
         )
         .await;
-        match created {
+        let made_here = match created {
             Err(error) if is_conflict(&error) => {
                 info!(container = %name, "another process is creating the computer");
                 self.wait_until_exists().await?;
+                false
             }
             other => {
                 other?;
+                true
             }
-        }
+        };
         let Err(error) = self.start_container().await else {
             return Ok(());
         };
-        if port_conflict(&format!("{error:#}"), true).is_none() {
-            return Err(error);
+        let explained = explain_start_error(error, made_here);
+        if made_here && explained.is::<PortConflict>() {
+            let remove = RemoveContainerOptionsBuilder::new().force(true).build();
+            let _ = within(
+                "removing the computer that could not start",
+                DOCKER_TIMEOUT,
+                self.docker.remove_container(name, Some(remove)),
+            )
+            .await;
         }
-        let explained = explain_start_error(error, true);
-        let remove = RemoveContainerOptionsBuilder::new().force(true).build();
-        let _ = within(
-            "removing the computer that could not start",
-            DOCKER_TIMEOUT,
-            self.docker.remove_container(name, Some(remove)),
-        )
-        .await;
         Err(explained)
     }
 

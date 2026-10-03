@@ -6,7 +6,9 @@ use std::{
     io,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    task::{Context as TaskContext, Poll},
     time::Duration,
 };
 
@@ -29,9 +31,10 @@ use computer_protocol::{SCREEN_COUNT, VIEWER_PORT, vnc_port};
 use futures_util::Stream;
 use serde::Deserialize;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{TcpListener, TcpStream},
-    sync::{broadcast, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch},
+    time::Instant,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, warn};
@@ -46,6 +49,26 @@ const KEY_HEADER: &str = "x-viewer-key";
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const XVNC_HOST: &str = "127.0.0.1";
 const COPY_BUFFER: usize = 32 * 1024;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const REFUSAL_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_VNC_CONNECTIONS_PER_SCREEN: usize = 8;
+const MAX_PAGE_CONNECTIONS: usize = 128;
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+const FREE_KEY_FAILURES: u32 = 5;
+const FIRST_KEY_BLOCK: Duration = Duration::from_secs(10);
+const LONGEST_KEY_BLOCK: Duration = Duration::from_secs(300);
+const KEY_FAILURES_FORGOTTEN_AFTER: Duration = Duration::from_secs(600);
+const SECURITY_HEADERS: [(header::HeaderName, &str); 4] = [
+    (
+        header::CONTENT_SECURITY_POLICY,
+        "default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
+    ),
+    (header::X_FRAME_OPTIONS, "DENY"),
+    (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+    (header::REFERRER_POLICY, "no-referrer"),
+];
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const APP_JS: &str = include_str!("../web/app.js");
@@ -98,6 +121,36 @@ fn content_type(path: &Path) -> &'static str {
     }
 }
 
+/// Slows down guessing of the viewer key: after a few wrong keys, every key is refused for a growing time.
+#[derive(Debug, Default)]
+struct Throttle {
+    failures: u32,
+    last_failure: Option<Instant>,
+    blocked_until: Option<Instant>,
+}
+
+impl Throttle {
+    fn blocked(&self, now: Instant) -> bool {
+        self.blocked_until.is_some_and(|until| now < until)
+    }
+
+    fn fail(&mut self, now: Instant) {
+        if self
+            .last_failure
+            .is_some_and(|last| now.duration_since(last) >= KEY_FAILURES_FORGOTTEN_AFTER)
+        {
+            self.failures = 0;
+        }
+        self.failures += 1;
+        self.last_failure = Some(now);
+        if self.failures >= FREE_KEY_FAILURES {
+            let doublings = (self.failures - FREE_KEY_FAILURES).min(8);
+            let block = (FIRST_KEY_BLOCK * 2u32.pow(doublings)).min(LONGEST_KEY_BLOCK);
+            self.blocked_until = Some(now + block);
+        }
+    }
+}
+
 fn keys_match(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
 }
@@ -111,15 +164,30 @@ struct ViewerState {
     hub: Hub,
     novnc: Arc<Path>,
     stop: CancellationToken,
+    throttle: Arc<Mutex<Throttle>>,
 }
 
 impl ViewerState {
-    fn key_ok(&self, headers: &HeaderMap, query: &KeyQuery) -> bool {
+    /// Checks the viewer key. A wrong key counts against the guess limit.
+    fn check_key(&self, headers: &HeaderMap, query: &KeyQuery) -> Result<(), StatusCode> {
+        let now = Instant::now();
+        let mut throttle = self
+            .throttle
+            .lock()
+            .expect("the throttle is only held for short updates");
+        if throttle.blocked(now) {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
         let given = headers
             .get(KEY_HEADER)
             .and_then(|value| value.to_str().ok())
             .or(query.key.as_deref());
-        given.is_some_and(|given| keys_match(given.as_bytes(), self.key.as_bytes()))
+        if given.is_some_and(|given| keys_match(given.as_bytes(), self.key.as_bytes())) {
+            Ok(())
+        } else {
+            throttle.fail(now);
+            Err(StatusCode::UNAUTHORIZED)
+        }
     }
 }
 
@@ -147,19 +215,23 @@ async fn check_origin(State(state): State<ViewerState>, request: Request, next: 
     let host_ok = text(header::HOST).is_some_and(|host| host_allowed(host, state.host_port));
     let origin_ok = headers.get(header::ORIGIN).is_none()
         || text(header::ORIGIN).is_some_and(|origin| origin_allowed(origin, state.host_port));
-    if host_ok && origin_ok {
+    let mut response = if host_ok && origin_ok {
         next.run(request).await
     } else {
         StatusCode::FORBIDDEN.into_response()
+    };
+    for (name, value) in SECURITY_HEADERS {
+        response
+            .headers_mut()
+            .insert(name, HeaderValue::from_static(value));
     }
+    response
 }
 
 fn page(content_type: &'static str, body: &'static str) -> Response {
     (
         [
             (header::CONTENT_TYPE, content_type),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-            (header::REFERRER_POLICY, "no-referrer"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
         body,
@@ -185,16 +257,10 @@ async fn novnc_file(State(state): State<ViewerState>, UrlPath(rest): UrlPath<Str
     };
     match tokio::fs::read(&path).await {
         Ok(bytes) => (
-            [
-                (
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static(content_type(&path)),
-                ),
-                (
-                    header::X_CONTENT_TYPE_OPTIONS,
-                    HeaderValue::from_static("nosniff"),
-                ),
-            ],
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(content_type(&path)),
+            )],
             bytes,
         )
             .into_response(),
@@ -249,9 +315,7 @@ async fn events(
     headers: HeaderMap,
     Query(query): Query<KeyQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    if !state.key_ok(&headers, &query) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    state.check_key(&headers, &query)?;
     let feed = Feed {
         sessions: state.sessions.clone(),
         changes: state.hub.subscribe_changes(),
@@ -282,8 +346,8 @@ async fn bridge(
     Query(query): Query<KeyQuery>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if !state.key_ok(&headers, &query) {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(status) = state.check_key(&headers, &query) {
+        return status.into_response();
     }
     if !valid_screen(screen) {
         return StatusCode::NOT_FOUND.into_response();
@@ -291,9 +355,38 @@ async fn bridge(
     let Ok(upstream) = connect_screen(screen).await else {
         return (StatusCode::NOT_FOUND, "this screen is not open").into_response();
     };
-    let viewer = state.hub.attach(screen);
+    let Some(viewer) = state.hub.attach(screen) else {
+        return (StatusCode::GONE, "this screen is closing").into_response();
+    };
     let stop = state.stop.clone();
     upgrade.on_upgrade(move |socket| relay_ws(socket, upstream, viewer, stop))
+}
+
+/// Tracks whether a WebSocket peer still answers. Any message from the peer counts as an answer.
+#[derive(Debug, Default)]
+struct Pings {
+    awaiting: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PingStep {
+    Send,
+    Close,
+}
+
+impl Pings {
+    fn heard(&mut self) {
+        self.awaiting = false;
+    }
+
+    /// Called once per ping interval. A peer that said nothing since the last ping is gone.
+    fn tick(&mut self) -> PingStep {
+        if std::mem::replace(&mut self.awaiting, true) {
+            PingStep::Close
+        } else {
+            PingStep::Send
+        }
+    }
 }
 
 /// Copies bytes between a noVNC WebSocket and the screen's VNC connection until either side ends.
@@ -305,18 +398,30 @@ async fn relay_ws(
 ) {
     let (mut from_vnc, mut to_vnc) = upstream.split();
     let mut buffer = vec![0u8; COPY_BUFFER];
+    let mut pings = Pings::default();
+    let mut ping_timer = tokio::time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
     loop {
         tokio::select! {
             () = stop.cancelled() => break,
-            message = socket.recv() => match message {
-                Some(Ok(Message::Binary(data))) => {
-                    if to_vnc.write_all(&data).await.is_err() {
-                        break;
-                    }
+            _ = ping_timer.tick() => {
+                if pings.tick() == PingStep::Close
+                    || socket.send(Message::Ping(Vec::new().into())).await.is_err()
+                {
+                    break;
                 }
-                Some(Ok(Message::Close(_)) | Err(_)) | None => break,
-                Some(Ok(_)) => {}
-            },
+            }
+            message = socket.recv() => {
+                pings.heard();
+                match message {
+                    Some(Ok(Message::Binary(data))) => {
+                        if to_vnc.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                    Some(Ok(_)) => {}
+                }
+            }
             read = from_vnc.read(&mut buffer) => match read {
                 Ok(0) | Err(_) => break,
                 Ok(count) => {
@@ -329,27 +434,128 @@ async fn relay_ws(
     }
 }
 
-/// Forwards one native VNC client to the screen's `Xvnc` until either side ends.
-async fn relay_tcp(mut client: TcpStream, screen: u8, hub: Hub, stop: CancellationToken) {
+/// Whether the screen's `Xvnc` accepted the viewer's password.
+#[derive(Debug, PartialEq, Eq)]
+enum Auth {
+    Accepted,
+    Refused,
+}
+
+async fn forward<R, W>(from: &mut R, to: &mut W, bytes: &mut [u8]) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    from.read_exact(bytes).await?;
+    to.write_all(bytes).await
+}
+
+/// Relays the RFB handshake between a viewer and `Xvnc` while reading it, and says whether the viewer authenticated.
+///
+/// Handles protocol versions 3.3 to 3.8 with VNC password authentication, the only method `Xvnc` offers.
+async fn relay_handshake<C, U>(client: &mut C, upstream: &mut U) -> io::Result<Auth>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
+    const VNC_AUTH: u32 = 2;
+    let mut version = [0u8; 12];
+    forward(upstream, client, &mut version).await?;
+    forward(client, upstream, &mut version).await?;
+    let minor: u32 = std::str::from_utf8(&version[8..11])
+        .ok()
+        .and_then(|minor| minor.parse().ok())
+        .unwrap_or(8);
+    let method = if minor < 7 {
+        let mut method = [0u8; 4];
+        forward(upstream, client, &mut method).await?;
+        u32::from_be_bytes(method)
+    } else {
+        let mut count = [0u8; 1];
+        forward(upstream, client, &mut count).await?;
+        if count[0] == 0 {
+            return Ok(Auth::Refused);
+        }
+        let mut offered = vec![0u8; usize::from(count[0])];
+        forward(upstream, client, &mut offered).await?;
+        let mut chosen = [0u8; 1];
+        forward(client, upstream, &mut chosen).await?;
+        u32::from(chosen[0])
+    };
+    if method != VNC_AUTH {
+        return Ok(Auth::Refused);
+    }
+    let mut block = [0u8; 16];
+    forward(upstream, client, &mut block).await?;
+    forward(client, upstream, &mut block).await?;
+    let mut result = [0u8; 4];
+    forward(upstream, client, &mut result).await?;
+    Ok(if u32::from_be_bytes(result) == 0 {
+        Auth::Accepted
+    } else {
+        Auth::Refused
+    })
+}
+
+/// Forwards one native VNC client to the screen's `Xvnc`. The client counts as a viewer once it authenticated.
+async fn relay_tcp(
+    mut client: TcpStream,
+    screen: u8,
+    hub: Hub,
+    stop: CancellationToken,
+    _permit: OwnedSemaphorePermit,
+) {
     let Ok(mut upstream) = connect_screen(screen).await else {
         debug!(screen, "refused a VNC client, the screen is not open");
         return;
     };
-    let _viewer = hub.attach(screen);
+    let handshake = tokio::select! {
+        () = stop.cancelled() => return,
+        done = tokio::time::timeout(HANDSHAKE_TIMEOUT, relay_handshake(&mut client, &mut upstream)) => done,
+    };
+    match handshake {
+        Ok(Ok(Auth::Accepted)) => {}
+        Ok(Ok(Auth::Refused)) => {
+            let flush = tokio::io::copy(&mut upstream, &mut client);
+            let _ = tokio::time::timeout(REFUSAL_FLUSH_TIMEOUT, flush).await;
+            return;
+        }
+        Ok(Err(_)) | Err(_) => return,
+    }
+    let Some(_viewer) = hub.attach(screen) else {
+        debug!(screen, "refused a VNC client, the screen is closing");
+        return;
+    };
     tokio::select! {
         () = stop.cancelled() => {}
         _ = tokio::io::copy_bidirectional(&mut client, &mut upstream) => {}
     }
 }
 
+/// Makes the kernel notice a peer that vanished without closing the connection.
+fn keep_alive(stream: &TcpStream) {
+    let settings = socket2::TcpKeepalive::new()
+        .with_time(KEEPALIVE_IDLE)
+        .with_interval(KEEPALIVE_INTERVAL);
+    if let Err(error) = socket2::SockRef::from(stream).set_tcp_keepalive(&settings) {
+        debug!(%error, "could not turn on TCP keepalive");
+    }
+}
+
 async fn accept_vnc(listener: TcpListener, screen: u8, hub: Hub, stop: CancellationToken) {
     let connections = TaskTracker::new();
+    let room = Arc::new(Semaphore::new(MAX_VNC_CONNECTIONS_PER_SCREEN));
     loop {
         tokio::select! {
             () = stop.cancelled() => break,
             accepted = listener.accept() => match accepted {
                 Ok((client, _)) => {
-                    drop(connections.spawn(relay_tcp(client, screen, hub.clone(), stop.clone())));
+                    let Ok(permit) = room.clone().try_acquire_owned() else {
+                        debug!(screen, "refused a VNC client, the screen has too many connections");
+                        continue;
+                    };
+                    keep_alive(&client);
+                    drop(connections.spawn(relay_tcp(client, screen, hub.clone(), stop.clone(), permit)));
                 }
                 Err(error) => {
                     warn!(screen, %error, "accepting a VNC client failed");
@@ -360,6 +566,80 @@ async fn accept_vnc(listener: TcpListener, screen: u8, hub: Hub, stop: Cancellat
     }
     connections.close();
     connections.wait().await;
+}
+
+/// Page server listener that caps open connections and turns on TCP keepalive.
+struct Capped {
+    inner: TcpListener,
+    room: Arc<Semaphore>,
+}
+
+/// An accepted page connection that frees its slot when dropped.
+struct Held {
+    io: TcpStream,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl AsyncRead for Held {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for Held {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.io).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_shutdown(cx)
+    }
+}
+
+impl axum::serve::Listener for Capped {
+    type Io = Held;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let permit = Arc::clone(&self.room)
+                .acquire_owned()
+                .await
+                .expect("the connection semaphore is never closed");
+            match self.inner.accept().await {
+                Ok((io, addr)) => {
+                    keep_alive(&io);
+                    return (
+                        Held {
+                            io,
+                            _permit: permit,
+                        },
+                        addr,
+                    );
+                }
+                Err(error) => {
+                    warn!(%error, "accepting a page connection failed");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
 }
 
 /// What the viewer needs from the rest of the daemon.
@@ -404,6 +684,11 @@ pub async fn start(config: Config) -> Result<Running> {
         hub: hub.clone(),
         novnc: config.novnc.into(),
         stop: stop.clone(),
+        throttle: Arc::default(),
+    };
+    let page = Capped {
+        inner: page,
+        room: Arc::new(Semaphore::new(MAX_PAGE_CONNECTIONS)),
     };
     let shutdown = stop.clone();
     drop(tasks.spawn(async move {
@@ -473,6 +758,7 @@ mod tests {
             hub: hub.clone(),
             novnc: root.into(),
             stop: CancellationToken::new(),
+            throttle: Arc::default(),
         };
         (router(state), hub)
     }
@@ -553,6 +839,149 @@ data: 2
         );
         drop(body);
         assert_eq!(hub.pages(), 0);
+    }
+
+    /// Plays `Xvnc` for one VNC password authentication. It accepts the response `challenge + 1` per byte.
+    async fn fake_xvnc(mut stream: tokio::io::DuplexStream, minor: u8) {
+        const CHALLENGE: [u8; 16] = [7; 16];
+        stream
+            .write_all(
+                b"RFB 003.008
+",
+            )
+            .await
+            .unwrap();
+        let mut version = [0u8; 12];
+        stream.read_exact(&mut version).await.unwrap();
+        assert_eq!(
+            version,
+            *format!(
+                "RFB 003.00{minor}
+"
+            )
+            .as_bytes()
+        );
+        if minor < 7 {
+            stream.write_all(&2u32.to_be_bytes()).await.unwrap();
+        } else {
+            stream.write_all(&[1, 2]).await.unwrap();
+            let mut chosen = [0u8; 1];
+            stream.read_exact(&mut chosen).await.unwrap();
+            assert_eq!(chosen, [2]);
+        }
+        stream.write_all(&CHALLENGE).await.unwrap();
+        let mut response = [0u8; 16];
+        stream.read_exact(&mut response).await.unwrap();
+        let ok = response == CHALLENGE.map(|byte| byte + 1);
+        stream
+            .write_all(&u32::from(!ok).to_be_bytes())
+            .await
+            .unwrap();
+    }
+
+    async fn handshake_as_client(minor: u8, password_ok: bool) -> Auth {
+        let (mut viewer, mut proxy_client) = tokio::io::duplex(1024);
+        let (mut proxy_upstream, xvnc) = tokio::io::duplex(1024);
+        let viewer_side = async {
+            let mut version = [0u8; 12];
+            viewer.read_exact(&mut version).await.unwrap();
+            viewer
+                .write_all(
+                    format!(
+                        "RFB 003.00{minor}
+"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            if minor < 7 {
+                let mut method = [0u8; 4];
+                viewer.read_exact(&mut method).await.unwrap();
+                assert_eq!(u32::from_be_bytes(method), 2);
+            } else {
+                let mut offered = [0u8; 2];
+                viewer.read_exact(&mut offered).await.unwrap();
+                assert_eq!(offered, [1, 2]);
+                viewer.write_all(&[2]).await.unwrap();
+            }
+            let mut challenge = [0u8; 16];
+            viewer.read_exact(&mut challenge).await.unwrap();
+            let response = challenge.map(|byte| if password_ok { byte + 1 } else { byte });
+            viewer.write_all(&response).await.unwrap();
+            let mut result = [0u8; 4];
+            viewer.read_exact(&mut result).await.unwrap();
+            assert_eq!(u32::from_be_bytes(result) == 0, password_ok);
+        };
+        let (auth, (), ()) = tokio::join!(
+            async {
+                relay_handshake(&mut proxy_client, &mut proxy_upstream)
+                    .await
+                    .unwrap()
+            },
+            viewer_side,
+            fake_xvnc(xvnc, minor)
+        );
+        auth
+    }
+
+    #[tokio::test]
+    async fn the_handshake_relay_reports_whether_the_password_was_accepted() {
+        for minor in [3, 7, 8] {
+            assert_eq!(
+                handshake_as_client(minor, true).await,
+                Auth::Accepted,
+                "3.{minor}"
+            );
+            assert_eq!(
+                handshake_as_client(minor, false).await,
+                Auth::Refused,
+                "3.{minor}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_silent_websocket_peer_is_closed_after_one_unanswered_ping() {
+        let mut pings = Pings::default();
+        assert_eq!(pings.tick(), PingStep::Send);
+        pings.heard();
+        assert_eq!(pings.tick(), PingStep::Send);
+        assert_eq!(pings.tick(), PingStep::Close);
+    }
+
+    #[test]
+    fn repeated_wrong_keys_block_all_keys_for_a_growing_time() {
+        let start = Instant::now();
+        let mut throttle = Throttle::default();
+        for _ in 0..4 {
+            throttle.fail(start);
+            assert!(!throttle.blocked(start));
+        }
+        throttle.fail(start);
+        assert!(throttle.blocked(start + Duration::from_secs(9)));
+        assert!(!throttle.blocked(start + Duration::from_secs(10)));
+        let later = start + Duration::from_secs(10);
+        throttle.fail(later);
+        assert!(throttle.blocked(later + Duration::from_secs(19)));
+        assert!(!throttle.blocked(later + Duration::from_secs(20)));
+        let much_later = later + KEY_FAILURES_FORGOTTEN_AFTER;
+        throttle.fail(much_later);
+        assert!(!throttle.blocked(much_later));
+    }
+
+    #[tokio::test]
+    async fn every_response_carries_the_security_headers() {
+        let root = std::env::temp_dir();
+        let (app, _) = app(&root);
+        for (uri, host) in [("/", "127.0.0.1:20900"), ("/", "evil.example:20900")] {
+            let response = app.clone().oneshot(get(uri, host, None)).await.unwrap();
+            let headers = response.headers();
+            let csp = headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+            assert!(csp.contains("frame-ancestors 'none'"), "{csp}");
+            assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY");
+            assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@ use des::{
     Des,
     cipher::{BlockCipherEncrypt, KeyInit},
 };
+use tracing::warn;
 use uuid::Uuid;
 
 /// VNC password authentication only looks at the first 8 characters.
@@ -82,10 +83,18 @@ pub fn ensure(home: &Path) -> Result<String> {
     let dir = config_dir(home);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let key_path = dir.join(KEY_FILE);
-    let stored = std::fs::read_to_string(&key_path)
-        .ok()
-        .map(|text| text.trim().to_owned())
-        .filter(|text| is_valid(text));
+    let stored = match std::fs::read_to_string(&key_path) {
+        Ok(text) if is_valid(text.trim()) => Some(text.trim().to_owned()),
+        Ok(_) => {
+            warn!(path = %key_path.display(), "the viewer key file is damaged, making a new key");
+            None
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            warn!(path = %key_path.display(), %error, "the viewer key file is unreadable, making a new key");
+            None
+        }
+    };
     let key = if let Some(key) = stored {
         key
     } else {

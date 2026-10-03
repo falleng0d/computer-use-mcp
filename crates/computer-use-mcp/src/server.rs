@@ -1262,6 +1262,36 @@ none
         )
     }
 
+    /// Viewers the page lists for the first session with a screen, read from its event stream.
+    async fn viewers_on_page(port_base: u16, key: &str) -> usize {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port_base))
+            .await
+            .unwrap();
+        let request = format!(
+            "GET /events HTTP/1.1
+Host: 127.0.0.1:{port_base}
+X-Viewer-Key: {key}
+
+"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut seen = Vec::new();
+        let mut chunk = [0u8; 2048];
+        let data = loop {
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0, "the event stream ended");
+            seen.extend_from_slice(&chunk[..count]);
+            let text = String::from_utf8_lossy(&seen).into_owned();
+            if let Some(line) = text.lines().find(|line| line.starts_with("data: ")) {
+                break line["data: ".len()..].to_owned();
+            }
+        };
+        let sessions: serde_json::Value = serde_json::from_str(&data).unwrap();
+        usize::try_from(sessions[0]["viewers"].as_u64().unwrap()).unwrap()
+    }
+
     #[tokio::test]
     #[ignore = "needs Docker"]
     async fn native_vnc_clients_authenticate_on_the_screens_port_and_cannot_resize_it() {
@@ -1304,8 +1334,18 @@ none
         assert_ne!(rfb_authenticate(&mut rfb, "wrongpwd").await, 0);
 
         let mut rfb = rfb_connect(screen_port).await;
+        assert_eq!(viewers_on_page(port_base, &key).await, 0);
         assert_eq!(rfb_authenticate(&mut rfb, &key).await, 0);
         assert_eq!(rfb_size(&mut rfb).await, (1024, 768));
+        let mut counted = 0;
+        for _ in 0..20 {
+            counted = viewers_on_page(port_base, &key).await;
+            if counted == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(counted, 1, "only the authenticated connection is a viewer");
         let mut name_len = [0u8; 20];
         rfb.stream.read_exact(&mut name_len).await.unwrap();
         let name_len = u32::from_be_bytes(name_len[16..20].try_into().unwrap());

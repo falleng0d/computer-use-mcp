@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -16,10 +16,18 @@ pub struct Hub(Arc<Inner>);
 
 struct Inner {
     host_base: u16,
-    viewers: Mutex<BTreeMap<u8, usize>>,
+    viewers: Mutex<Viewers>,
     pages: AtomicUsize,
     changed: watch::Sender<u64>,
     show: broadcast::Sender<u8>,
+}
+
+/// Viewer counts per screen, and the screens that accept no new viewers.
+#[derive(Default)]
+struct Viewers {
+    counts: BTreeMap<u8, usize>,
+    /// Screens whose session ended. Existing viewers stay until they leave.
+    ended: BTreeSet<u8>,
 }
 
 impl Hub {
@@ -42,7 +50,7 @@ impl Hub {
         self.0.host_base + u16::from(screen)
     }
 
-    fn counts(&self) -> std::sync::MutexGuard<'_, BTreeMap<u8, usize>> {
+    fn counts(&self) -> std::sync::MutexGuard<'_, Viewers> {
         self.0
             .viewers
             .lock()
@@ -51,17 +59,37 @@ impl Hub {
 
     /// Viewers attached to `screen`, browser or native.
     pub fn viewers(&self, screen: u8) -> usize {
-        self.counts().get(&screen).copied().unwrap_or(0)
+        self.counts().counts.get(&screen).copied().unwrap_or(0)
     }
 
     /// Counts a viewer on `screen` until the guard drops.
-    pub fn attach(&self, screen: u8) -> ViewerGuard {
-        *self.counts().entry(screen).or_insert(0) += 1;
+    ///
+    /// Returns `None` when the screen's session has ended.
+    pub fn attach(&self, screen: u8) -> Option<ViewerGuard> {
+        {
+            let mut viewers = self.counts();
+            if viewers.ended.contains(&screen) {
+                return None;
+            }
+            *viewers.counts.entry(screen).or_insert(0) += 1;
+        }
         self.notify();
-        ViewerGuard {
+        Some(ViewerGuard {
             hub: self.clone(),
             screen,
-        }
+        })
+    }
+
+    /// Stops new viewers on `screen` because its session ended. Returns true while a viewer is attached.
+    pub fn end_screen(&self, screen: u8) -> bool {
+        let mut viewers = self.counts();
+        viewers.ended.insert(screen);
+        viewers.counts.contains_key(&screen)
+    }
+
+    /// Accepts viewers on `screen` again, once a new session owns it.
+    pub fn reopen_screen(&self, screen: u8) {
+        self.counts().ended.remove(&screen);
     }
 
     /// Counts an open viewer page until the guard drops.
@@ -112,14 +140,14 @@ pub struct ViewerGuard {
 
 impl Drop for ViewerGuard {
     fn drop(&mut self) {
-        let mut counts = self.hub.counts();
-        if let Some(count) = counts.get_mut(&self.screen) {
+        let mut viewers = self.hub.counts();
+        if let Some(count) = viewers.counts.get_mut(&self.screen) {
             *count -= 1;
             if *count == 0 {
-                counts.remove(&self.screen);
+                viewers.counts.remove(&self.screen);
             }
         }
-        drop(counts);
+        drop(viewers);
         self.hub.notify();
     }
 }
@@ -141,9 +169,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn detached_waits_for_the_last_viewer_of_that_screen_only() {
         let hub = Hub::new(20900);
-        let first = hub.attach(3);
-        let second = hub.attach(3);
-        let other = hub.attach(4);
+        let first = hub.attach(3).unwrap();
+        let second = hub.attach(3).unwrap();
+        let other = hub.attach(4).unwrap();
         assert_eq!(hub.viewers(3), 2);
 
         let waiting = tokio::spawn({
@@ -159,6 +187,21 @@ mod tests {
         assert_eq!(hub.viewers(4), 1);
         drop(other);
         assert_eq!(hub.viewers(4), 0);
+    }
+
+    #[test]
+    fn an_ended_screen_keeps_its_viewers_but_takes_no_new_ones_until_reopened() {
+        let hub = Hub::new(20900);
+        let first = hub.attach(2).unwrap();
+        assert!(hub.end_screen(2));
+        assert!(hub.attach(2).is_none());
+        assert_eq!(hub.viewers(2), 1);
+        assert!(hub.attach(3).is_some());
+        drop(first);
+        assert!(!hub.end_screen(2));
+        assert!(hub.attach(2).is_none());
+        hub.reopen_screen(2);
+        assert!(hub.attach(2).is_some());
     }
 
     #[test]

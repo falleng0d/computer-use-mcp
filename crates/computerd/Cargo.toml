@@ -22,6 +22,7 @@ des = "0.9.0"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
+socket2 = { version = "0.6.5", features = ["all"] }
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["formatting"] }
 tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "process", "time", "fs", "io-util"] }

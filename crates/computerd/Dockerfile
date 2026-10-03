@@ -22,9 +22,9 @@ RUN gpg --import /tmp/awscli.pub \
     && /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli
 FROM debian:trixie-slim AS novnc
 ARG NOVNC_VERSION=1.7.0
-ARG NOVNC_SHA256=b1003a11b6e6e8d8f7f5e5586daae7f8ca651d8aee0aa155ff9ac841c48f52c6
-RUN apt-get update     && apt-get install -y --no-install-recommends ca-certificates curl
-RUN curl -fsSL "https://github.com/novnc/noVNC/archive/refs/tags/v${NOVNC_VERSION}.tar.gz" -o /tmp/novnc.tar.gz     && echo "${NOVNC_SHA256}  /tmp/novnc.tar.gz" | sha256sum -c -     && mkdir -p /out /tmp/src     && tar -xzf /tmp/novnc.tar.gz -C /tmp/src --strip-components=1     && cp -r /tmp/src/core /tmp/src/vendor /tmp/src/LICENSE.txt /out/
+ARG NOVNC_COMMIT=63107bd06d9e1f6136ff21aeda8cd62cbf0d433e
+RUN apt-get update     && apt-get install -y --no-install-recommends ca-certificates git
+RUN git clone --quiet --depth 1 --branch "v${NOVNC_VERSION}" https://github.com/novnc/noVNC.git /tmp/src     && test "$(git -C /tmp/src rev-parse HEAD)" = "${NOVNC_COMMIT}"     && mkdir -p /out     && cp -r /tmp/src/core /tmp/src/vendor /tmp/src/LICENSE.txt /out/
 
 FROM debian:trixie-slim
 ARG NODE_MAJOR=24

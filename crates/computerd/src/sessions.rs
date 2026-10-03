@@ -401,7 +401,7 @@ impl Sessions {
         session.cancel.cancel();
         let viewed = session
             .screen()
-            .is_some_and(|screen| self.hub.viewers(screen) > 0);
+            .is_some_and(|screen| self.hub.end_screen(screen));
         let closed = self.closing.spawn(close_screen(
             session,
             self.hub.clone(),
@@ -458,6 +458,7 @@ impl Sessions {
                 vnc_port = self.hub.host_vnc_port(screen.number()),
                 "screen opened for viewing"
             );
+            self.hub.reopen_screen(screen.number());
             self.hub.notify();
             *slot = Slot::Open(Box::new(screen));
         }
@@ -774,7 +775,7 @@ mod tests {
         let id = start(&sessions, '1', &who, 3600);
         let session = sessions.get(&id).unwrap();
         *lock(&session.display) = Some(3);
-        let viewer = sessions.hub().attach(3);
+        let viewer = sessions.hub().attach(3).unwrap();
 
         sessions.end(&id).await.unwrap();
         pass(5).await;
@@ -793,7 +794,7 @@ mod tests {
         let who = owner('a');
         let id = start(&sessions, '1', &who, 20);
         *lock(&sessions.get(&id).unwrap().display) = Some(2);
-        let viewer = sessions.hub().attach(2);
+        let viewer = sessions.hub().attach(2).unwrap();
         let stop = CancellationToken::new();
         let reaper = tokio::spawn({
             let (sessions, stop) = (sessions.clone(), stop.clone());
