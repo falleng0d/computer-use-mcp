@@ -52,7 +52,7 @@ RUN ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws \
     && ln -s /usr/local/aws-cli/v2/current/bin/aws_completer /usr/local/bin/aws_completer
 RUN useradd --create-home --uid 1000 --shell /bin/bash computer \
     && echo 'computer ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/computer \
-    && chmod 0440 /etc/sudoers.d/computer
+    && chmod 0440 /etc/sudoers.d/computer     && mkdir -m 1777 /tmp/.X11-unix
 COPY --chmod=0644 crates/computerd/image/profile.sh /etc/profile.d/computer.sh
 COPY --chmod=0644 crates/computerd/image/XTerm /etc/X11/app-defaults/XTerm
 COPY --chmod=0755 crates/computerd/image/check-tools.sh /usr/local/bin/check-tools
