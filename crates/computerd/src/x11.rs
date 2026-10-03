@@ -1,4 +1,4 @@
-//! Reads one X display: pixels over MIT-SHM, damage, pointer, and the focused window title.
+//! One X display: pixels over MIT-SHM, damage, pointer, the focused window title, and input over XTEST.
 
 use anyhow::{Context, Result, bail, ensure};
 use computer_protocol::{Cursor, ScreenSize};
@@ -9,11 +9,14 @@ use x11rb::{
         damage::{self, ConnectionExt as _, ReportLevel},
         shm::{self, ConnectionExt as _},
         xproto::{AtomEnum, ConnectionExt as _, ImageFormat, Window},
+        xtest::{self, ConnectionExt as _},
     },
     rust_connection::RustConnection,
 };
 
 use crate::{frames::BYTES_PER_PIXEL, shm::Segment};
+
+mod input;
 
 const DEPTH: u8 = 24;
 
@@ -32,6 +35,7 @@ struct Atoms {
     wm_name: u32,
     utf8_string: u32,
     wm_check: u32,
+    client_list: u32,
 }
 
 fn atom(conn: &RustConnection, name: &str) -> Result<u32> {
@@ -75,6 +79,9 @@ impl Capturer {
             .context("the display has no MIT-SHM extension")?;
         conn.extension_information(damage::X11_EXTENSION_NAME)?
             .context("the display has no DAMAGE extension")?;
+        conn.extension_information(xtest::X11_EXTENSION_NAME)?
+            .context("the display has no XTEST extension")?;
+        conn.xtest_get_version(2, 2)?.reply()?;
         conn.damage_query_version(1, 1)?.reply()?;
         conn.shm_query_version()?.reply()?;
 
@@ -98,6 +105,7 @@ impl Capturer {
             wm_name: atom(&conn, "_NET_WM_NAME")?,
             utf8_string: atom(&conn, "UTF8_STRING")?,
             wm_check: atom(&conn, "_NET_SUPPORTING_WM_CHECK")?,
+            client_list: atom(&conn, "_NET_CLIENT_LIST")?,
         };
         Ok(Self {
             conn,
@@ -171,6 +179,11 @@ impl Capturer {
         if window == 0 {
             return Ok(String::new());
         }
+        self.window_title(window)
+    }
+
+    /// Title of `window`, or an empty string when it has none.
+    fn window_title(&self, window: Window) -> Result<String> {
         for (property, kind) in [
             (self.atoms.wm_name, self.atoms.utf8_string),
             (AtomEnum::WM_NAME.into(), AtomEnum::STRING.into()),

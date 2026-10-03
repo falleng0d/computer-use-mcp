@@ -9,8 +9,8 @@ use axum::{
     routing::{delete, get, post},
 };
 use computer_protocol::{
-    ApiError, CreateSession, Health, Observation, PROTOCOL_VERSION, SessionCreated, SessionId,
-    VERSION,
+    ActReply, ActRequest, ApiError, CreateSession, Health, Observation, PROTOCOL_VERSION,
+    SessionCreated, SessionId, VERSION,
 };
 use tracing::error;
 use uuid::Uuid;
@@ -35,6 +35,7 @@ pub fn router(token: String, sessions: Sessions) -> Router {
         .route("/sessions", post(create_session))
         .route("/sessions/{id}", delete(end_session))
         .route("/sessions/{id}/observe", post(observe))
+        .route("/sessions/{id}/act", post(act))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state)
 }
@@ -92,11 +93,20 @@ async fn observe(
     state.sessions.observe(&id).await.map(Json)
 }
 
+async fn act(
+    State(state): State<AppState>,
+    Path(id): Path<SessionId>,
+    Json(request): Json<ActRequest>,
+) -> Result<Json<ActReply>, SessionError> {
+    state.sessions.act(&id, request).await.map(Json)
+}
+
 impl IntoResponse for SessionError {
     fn into_response(self) -> Response {
         let status = match self {
             Self::Unknown => StatusCode::NOT_FOUND,
             Self::NoFreeScreen => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Rejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if let Self::Failed(error) = &self {

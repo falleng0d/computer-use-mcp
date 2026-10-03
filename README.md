@@ -2,7 +2,7 @@
 
 An MCP server that gives AI agents a computer. Any MCP client, such as Claude Code or OpenCode, can see and control one shared Linux desktop that runs in Docker. You can watch and use the same desktop through VNC.
 
-> **Status:** early. The MCP server starts the computer and hands out sessions (`start_computer`, `end_session`). The desktop stack and the other tools are not built yet.
+> **Status:** early. The MCP server starts the computer and hands out sessions (`start_computer`, `end_session`), shows each session its own screen (`computer_observe`), and lets it click, type, and scroll (`computer_act`). The other tools are not built yet.
 
 ## Design
 
@@ -42,6 +42,8 @@ Release builds pull their image when it is missing. Dev builds never pull, so a 
 The server makes no Docker calls until an agent calls `start_computer`. That tool takes a title (1 to 80 characters) and returns a session id. The computer gets the host timezone and the `en_US.UTF-8` locale when it is created.
 
 `computer_observe` takes the session id and returns a PNG of that session's own screen plus the frame id, capture time, size, cursor position, and active window title. The first call opens the screen, which is one `Xvnc` and Fluxbox inside the computer. The computer has 16 screens. A session that never calls it gets none, and ending the session closes its screen. When nothing changed since the session's previous screenshot, the image is left out and the text says so.
+
+`computer_act` takes the session id and up to 24 ordered actions: `click`, `move`, `down`, `up`, `type`, `key`, `scroll`, `wait`, and `focus`. Positions are pixels on the session's screen. A double click counts as two actions. Waits and the settle time are capped at 5 s, and a scroll takes 1 to 20 steps. `type` handles any Unicode text. `key` takes names such as `enter`, `esc`, and `f5` with the modifiers `ctrl`, `alt`, `shift`, and `super` (also `cmd`, `option`, `meta`, `win`). `focus` raises an open window by its class or title. Launching apps comes later. The batch ends with a screenshot by default, taken `settle_ms` (default 300) after the last action, and the unchanged-frame rule applies to it. Set `observe` to false to skip it. The 4th identical batch of scroll, pointer, or key actions in a row that leaves the screen unchanged is refused.
 
 ## Development
 

@@ -1,4 +1,4 @@
-use computer_protocol::Observation;
+use computer_protocol::{ActReply, Observation};
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 
@@ -27,6 +27,25 @@ pub fn tool_result(observation: Observation) -> CallToolResult {
         content.push(ContentBlock::image(png, PNG_MIME));
     }
     CallToolResult::success(content)
+}
+
+/// The tool result for a batch of actions: a count, then the closing screenshot when there is one.
+pub fn act_result(reply: ActReply) -> CallToolResult {
+    let ran = format!(
+        "Ran {} action{}.",
+        reply.actions_run,
+        if reply.actions_run == 1 { "" } else { "s" }
+    );
+    match reply.observation {
+        Some(observation) => {
+            let mut result = tool_result(observation);
+            result.content.insert(0, ContentBlock::text(ran));
+            result
+        }
+        None => CallToolResult::success(vec![ContentBlock::text(format!(
+            "{ran} No screenshot was requested."
+        ))]),
+    }
 }
 
 #[cfg(test)]
@@ -85,5 +104,21 @@ mod tests {
                 .unwrap()
                 .contains("previous screenshot remains valid")
         );
+    }
+
+    #[test]
+    fn act_result_counts_actions_before_the_screenshot() {
+        let reply = |observation| ActReply {
+            actions_run: 2,
+            observation,
+        };
+        let with_image = as_json(&act_result(reply(Some(observation(Some("QUJD"))))));
+        let content = with_image["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["text"], "Ran 2 actions.");
+        assert_eq!(content[2]["type"], "image");
+
+        let without = as_json(&act_result(reply(None)));
+        assert_eq!(without["content"].as_array().unwrap().len(), 1);
     }
 }

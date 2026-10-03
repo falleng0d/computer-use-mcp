@@ -33,4 +33,4 @@ tower = { version = "0.5.3", features = ["util"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.190"
-x11rb = { version = "0.14.0", default-features = false, features = ["shm", "damage"] }
+x11rb = { version = "0.14.0", default-features = false, features = ["shm", "damage", "xtest"] }

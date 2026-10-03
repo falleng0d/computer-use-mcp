@@ -11,7 +11,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:trixie-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        locales tzdata tigervnc-standalone-server fluxbox xkb-data fonts-dejavu-core \
+        locales tzdata tigervnc-standalone-server fluxbox xterm xkb-data fonts-dejavu-core \
     && sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*

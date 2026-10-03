@@ -9,13 +9,15 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use computer_protocol::{Observation, ScreenSize};
+use computer_protocol::{ActReply, ActRequest, Observation, ScreenSize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::process::{Child, Command};
 use tracing::{info, warn};
 
 use crate::{
     frames::{self, FrameTracker},
+    guard::{LoopGuard, Outcome},
+    plan::{self, Step},
     x11::Capturer,
 };
 
@@ -29,6 +31,39 @@ const WM_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Pause after each input step so the window manager and applications handle it before the next one.
+const STEP_GAP: Duration = Duration::from_millis(30);
+
+/// Why a call on a screen failed.
+#[derive(Debug, thiserror::Error)]
+pub enum ScreenError {
+    /// The request cannot be run as given. The screen is fine.
+    #[error("{0}")]
+    Rejected(String),
+    #[error("{0:#}")]
+    Failed(anyhow::Error),
+}
+
+impl From<anyhow::Error> for ScreenError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl ScreenError {
+    fn at_step(self, number: usize, total: usize) -> Self {
+        let ran = number - 1;
+        match self {
+            Self::Rejected(message) => Self::Rejected(format!(
+                "action {number} of {total} failed, the {ran} before it already ran: {message}"
+            )),
+            Self::Failed(error) => Self::Failed(error.context(format!(
+                "action {number} of {total} failed, the {ran} before it already ran"
+            ))),
+        }
+    }
+}
 
 /// Lowest screen number from [`FIRST_SCREEN`] to [`LAST_SCREEN`] that is not in `used`.
 pub fn lowest_free(used: &BTreeSet<u8>) -> Option<u8> {
@@ -171,6 +206,7 @@ pub struct Screen {
     size: ScreenSize,
     processes: Processes,
     source: Arc<Mutex<Source>>,
+    guard: LoopGuard,
 }
 
 /// Everything a capture touches, locked together inside `spawn_blocking`.
@@ -193,6 +229,7 @@ impl Screen {
                     size,
                     processes,
                     source,
+                    guard: LoopGuard::default(),
                 })
             }
             Err(error) => {
@@ -257,11 +294,118 @@ impl Screen {
             .context("running the capture")?
     }
 
+    /// Runs a batch of actions in order, then takes the closing screenshot when asked.
+    ///
+    /// Nothing runs when the batch is invalid or repeats a batch that already changed nothing.
+    pub async fn act(&mut self, request: ActRequest) -> Result<ActReply, ScreenError> {
+        let steps = plan::plan(&request.actions, self.size).map_err(ScreenError::Rejected)?;
+        if let Some(count) = self.guard.refusal(&request.actions) {
+            return Err(ScreenError::Rejected(format!(
+                "this exact batch already ran {count} times in a row and the screen did not change, so it was not run again. The latest screenshot is still current. Change your approach: aim at a different target, use the keyboard, or check which window is in front."
+            )));
+        }
+        let before = self.frame_id().await?;
+        let total = steps.len();
+        for (index, step) in steps.into_iter().enumerate() {
+            if let Err(error) = self.run_step(step).await {
+                self.guard.reset();
+                return Err(error.at_step(index + 1, total));
+            }
+        }
+        if !request.observe {
+            self.guard.record(&request.actions, Outcome::Unknown);
+            return Ok(ActReply {
+                actions_run: total,
+                observation: None,
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(u64::from(request.settle_ms))).await;
+        let observation = self.observe().await?;
+        let outcome = if observation.frame_id == before {
+            Outcome::Unchanged
+        } else {
+            Outcome::Changed
+        };
+        self.guard.record(&request.actions, outcome);
+        Ok(ActReply {
+            actions_run: total,
+            observation: Some(observation),
+        })
+    }
+
+    /// Id of the frame the screen shows now, without taking an image.
+    async fn frame_id(&self) -> Result<u64> {
+        let source = Arc::clone(&self.source);
+        tokio::task::spawn_blocking(move || {
+            let mut guard = source
+                .lock()
+                .expect("the capture lock is only held inside spawn_blocking");
+            let Source { capturer, frames } = &mut *guard;
+            Ok(frames.observe(capturer.take_damage()?).id)
+        })
+        .await
+        .context("checking the screen")?
+    }
+
+    async fn run_step(&self, step: Step) -> Result<(), ScreenError> {
+        let source = Arc::clone(&self.source);
+        match step {
+            Step::Wait(duration) => {
+                tokio::time::sleep(duration).await;
+                return Ok(());
+            }
+            Step::Input(input) => {
+                tokio::task::spawn_blocking(move || {
+                    source
+                        .lock()
+                        .expect("the capture lock is only held inside spawn_blocking")
+                        .capturer
+                        .perform(&input)
+                })
+                .await
+                .context("running the action")??;
+            }
+            Step::Focus(application) => {
+                let target = application.clone();
+                let open: Option<Vec<String>> = tokio::task::spawn_blocking(move || {
+                    let guard = source
+                        .lock()
+                        .expect("the capture lock is only held inside spawn_blocking");
+                    let windows = guard.capturer.windows()?;
+                    match plan::pick_window(&windows, &target) {
+                        Some(window) => guard.capturer.activate(window.id).map(|()| None),
+                        None => Ok(Some(
+                            windows.iter().map(plan::WindowInfo::describe).collect(),
+                        )),
+                    }
+                })
+                .await
+                .context("focusing the window")??;
+                if let Some(open) = open {
+                    return Err(no_window(&application, &open));
+                }
+            }
+        }
+        tokio::time::sleep(STEP_GAP).await;
+        Ok(())
+    }
+
     /// Stops the screen's processes. The screen number frees when `self` drops.
     pub async fn close(self) {
         info!(screen = self.number, "closing screen");
         self.processes.stop().await;
     }
+}
+
+fn no_window(application: &str, open: &[String]) -> ScreenError {
+    let listing = if open.is_empty() {
+        "No windows are open.".to_owned()
+    } else {
+        format!("Open windows: {}.", open.join(", "))
+    };
+    ScreenError::Rejected(format!(
+        "no open window matches {application:?}. {listing} Launching applications is not available yet, so focus only raises windows that are already open."
+    ))
 }
 
 fn capture(source: &Mutex<Source>, size: ScreenSize) -> Result<Observation> {

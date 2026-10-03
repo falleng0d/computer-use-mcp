@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use computer_protocol::{ScreenSize, SessionId, SessionTitle};
+use computer_protocol::{ActRequest, RawAction, ScreenSize, SessionId, SessionTitle};
 use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, schemars, tool, tool_handler,
     tool_router,
@@ -36,6 +36,18 @@ pub struct EndSessionArgs {
 pub struct ObserveArgs {
     /// Session id returned by `start_computer`.
     session: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ActArgs {
+    /// Session id returned by `start_computer`.
+    session: String,
+    /// Up to 24 actions, run in order on your screen. A double click counts as two.
+    actions: Vec<RawAction>,
+    /// End with a screenshot of the result. Default true.
+    observe: Option<bool>,
+    /// Milliseconds to wait before that screenshot so the screen can settle, up to 5000. Default 300.
+    settle_ms: Option<f64>,
 }
 
 /// Reads the screen size setting. An invalid value is kept as a message for `start_computer`.
@@ -120,6 +132,15 @@ impl Server {
         }
     }
 
+    async fn act(&self, args: ActArgs) -> anyhow::Result<CallToolResult> {
+        let request = ActRequest::parse(&args.actions, args.observe, args.settle_ms)?;
+        let (session, client) = self.client_for(&args.session).await?;
+        match client.act(&session, &request).await {
+            Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
+            other => other.map(observation::act_result),
+        }
+    }
+
     async fn end(&self, session: &str) -> anyhow::Result<()> {
         let (session, client) = self.client_for(session).await?;
         match client.end_session(&session).await {
@@ -179,6 +200,21 @@ impl Server {
         result.map_err(|error| {
             let message = format!("{error:#}");
             error!(tool = "computer_observe", error = %message, "tool call failed");
+            message
+        })
+    }
+
+    #[tool(
+        description = "Act on your own screen with up to 24 ordered actions, optionally ending with a screenshot. Coordinates are pixels from the top left of the latest screenshot. Actions: click {x, y, button?: left|right|middle, double?}, move {x, y}, down/up {x?, y?, button?} to drag, type {text} for any Unicode text (a newline presses Enter), key {key, modifiers?} for keys like enter, esc, tab, backspace, delete, space, arrows, home, end, pageup, pagedown, f1 to f12 or a single character with modifiers ctrl, alt, shift, super (also cmd, option), scroll {x?, y?, direction: up|down|left|right, amount? 1 to 20, default 3}, wait {ms? up to 5000, default 350}, focus {application} to raise an already open window by name or title. Batch only predictable actions and stop before an outcome you need to inspect. By default the batch ends with a screenshot taken settle_ms (default 300) after the last action; set observe to false to skip it. Repeating the same scroll, pointer, or key batch after it changed nothing is refused on the 4th try, so change your approach."
+    )]
+    async fn computer_act(
+        &self,
+        Parameters(args): Parameters<ActArgs>,
+    ) -> Result<CallToolResult, String> {
+        let result = self.act(args).await;
+        result.map_err(|error| {
+            let message = format!("{error:#}");
+            error!(tool = "computer_act", error = %message, "tool call failed");
             message
         })
     }
@@ -347,5 +383,88 @@ mod tests {
             docker.list_containers(Some(options)).await.unwrap().len(),
             1
         );
+    }
+
+    fn act_args(session: &SessionId, actions: &serde_json::Value) -> ActArgs {
+        serde_json::from_value(serde_json::json!({
+            "session": session.as_str(),
+            "actions": actions,
+            "settle_ms": 100,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Docker"]
+    async fn acting_changes_the_screen_and_a_repeated_idle_batch_is_refused() {
+        let name = format!("computer-use-test-{}", Uuid::new_v4().simple());
+        let settings = Settings {
+            name: name.clone(),
+            timezone: None,
+        };
+        let docker = Docker::connect_with_defaults().unwrap();
+        let _cleanup = Cleanup {
+            docker,
+            name,
+            volume: settings.volume(),
+        };
+        let server = Server::new(settings, image::from_env(), Ok(ScreenSize::default()));
+        let session = server.start("actor").await.unwrap();
+
+        let menu = server
+            .act(act_args(
+                &session,
+                &serde_json::json!([{ "kind": "click", "x": 600, "y": 400, "button": "right" }]),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            menu.content.len(),
+            3,
+            "the opened menu is a new frame with an image"
+        );
+
+        let off_screen = server
+            .act(act_args(
+                &session,
+                &serde_json::json!([{ "kind": "click", "x": 5000, "y": 1 }]),
+            ))
+            .await
+            .unwrap_err();
+        assert!(off_screen.to_string().contains("1280x800"), "{off_screen}");
+
+        let scroll = || {
+            act_args(
+                &session,
+                &serde_json::json!([{ "kind": "scroll", "direction": "down", "x": 900, "y": 600 }]),
+            )
+        };
+        let mut allowed = 0;
+        let mut refusal = None;
+        for _ in 0..10 {
+            match server.act(scroll()).await {
+                Ok(_) => allowed += 1,
+                Err(error) => {
+                    refusal = Some(error);
+                    break;
+                }
+            }
+        }
+        let refusal = refusal.expect("a repeated idle batch is refused");
+        assert!(allowed >= 3, "refused after only {allowed} runs");
+        assert!(
+            refusal.to_string().contains("Change your approach"),
+            "{refusal}"
+        );
+
+        server
+            .act(act_args(
+                &session,
+                &serde_json::json!([{ "kind": "type", "text": "é→" }]),
+            ))
+            .await
+            .unwrap();
+        server.act(scroll()).await.unwrap();
+        server.end(session.as_str()).await.unwrap();
     }
 }

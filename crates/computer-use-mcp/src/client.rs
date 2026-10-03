@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use computer_protocol::{
-    ApiError, CreateSession, Health, Observation, PROTOCOL_VERSION, ScreenSize, SessionCreated,
-    SessionId, SessionTitle, VERSION,
+    ActReply, ActRequest, ApiError, CreateSession, Health, Observation, PROTOCOL_VERSION,
+    ScreenSize, SessionCreated, SessionId, SessionTitle, VERSION,
 };
 use reqwest::StatusCode;
 
@@ -11,6 +11,8 @@ use crate::computer::Endpoint;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(40);
+/// Time on top of the batch's own budget for the HTTP round trip.
+const ACT_MARGIN: Duration = Duration::from_secs(10);
 const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const HEALTH_DEADLINE: Duration = Duration::from_secs(60);
 const HEALTH_RETRY: Duration = Duration::from_millis(250);
@@ -144,5 +146,35 @@ impl Client {
             .json()
             .await
             .context("reading the screenshot reply")
+    }
+
+    /// Runs a batch of actions on the session's screen.
+    ///
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub async fn act(&self, session: &SessionId, request: &ActRequest) -> Result<ActReply> {
+        let response = self
+            .http
+            .post(format!("{}/sessions/{session}/act", self.base))
+            .bearer_auth(&self.token)
+            .timeout(request.time_budget() + ACT_MARGIN)
+            .json(request)
+            .send()
+            .await
+            .context("sending the actions to the computer")?;
+        let status = response.status();
+        if status == StatusCode::NOT_FOUND {
+            return Err(UnknownSession.into());
+        }
+        if !status.is_success() {
+            let message = match response.json::<ApiError>().await {
+                Ok(error) => error.message,
+                Err(_) => format!("the computer answered {status}"),
+            };
+            bail!("{message}");
+        }
+        response
+            .json()
+            .await
+            .context("reading the reply to the actions")
     }
 }

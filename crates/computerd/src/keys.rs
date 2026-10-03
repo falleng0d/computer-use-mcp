@@ -1,0 +1,243 @@
+//! Key names, keysyms, and the keyboard mapping lookups used to type.
+
+pub const SHIFT_L: u32 = 0xffe1;
+pub const RETURN: u32 = 0xff0d;
+pub const TAB: u32 = 0xff09;
+
+/// Offset that turns a Unicode code point into a keysym outside Latin-1.
+const UNICODE_KEYSYM_BASE: u32 = 0x0100_0000;
+
+const NAMED_KEYS: &[(&str, u32)] = &[
+    ("enter", RETURN),
+    ("return", RETURN),
+    ("esc", 0xff1b),
+    ("escape", 0xff1b),
+    ("tab", TAB),
+    ("backspace", 0xff08),
+    ("delete", 0xffff),
+    ("del", 0xffff),
+    ("insert", 0xff63),
+    ("space", 0x20),
+    ("left", 0xff51),
+    ("up", 0xff52),
+    ("right", 0xff53),
+    ("down", 0xff54),
+    ("home", 0xff50),
+    ("end", 0xff57),
+    ("pageup", 0xff55),
+    ("page_up", 0xff55),
+    ("pagedown", 0xff56),
+    ("page_down", 0xff56),
+];
+
+const MODIFIERS: &[(&str, u32)] = &[
+    ("ctrl", 0xffe3),
+    ("control", 0xffe3),
+    ("shift", SHIFT_L),
+    ("alt", 0xffe9),
+    ("option", 0xffe9),
+    ("super", 0xffeb),
+    ("cmd", 0xffeb),
+    ("meta", 0xffeb),
+    ("win", 0xffeb),
+];
+
+const F1: u32 = 0xffbe;
+const LAST_FUNCTION_KEY: u32 = 12;
+
+/// Keysym for typing `c`, or `None` for control characters that have no key.
+///
+/// A newline is Enter and a tab is Tab. A carriage return has no key.
+pub fn char_keysym(c: char) -> Option<u32> {
+    match c {
+        '\n' => Some(RETURN),
+        '\t' => Some(TAB),
+        '\u{20}'..='\u{7e}' | '\u{a0}'..='\u{ff}' => Some(u32::from(c)),
+        c if c.is_control() => None,
+        c => Some(UNICODE_KEYSYM_BASE + u32::from(c)),
+    }
+}
+
+/// Keysym for a key name such as `enter`, `PageDown`, `f5`, or a single character.
+pub fn key_keysym(name: &str) -> Result<u32, String> {
+    let mut chars = name.chars();
+    if let (Some(only), None) = (chars.next(), chars.next()) {
+        return char_keysym(only).ok_or_else(|| format!("{name:?} is not a key"));
+    }
+    let lower = name.to_lowercase();
+    if let Some((_, keysym)) = NAMED_KEYS.iter().find(|(known, _)| *known == lower) {
+        return Ok(*keysym);
+    }
+    if let Some((_, keysym)) = MODIFIERS.iter().find(|(known, _)| *known == lower) {
+        return Ok(*keysym);
+    }
+    if let Some(number) = lower
+        .strip_prefix('f')
+        .and_then(|digits| digits.parse::<u32>().ok())
+        .filter(|number| (1..=LAST_FUNCTION_KEY).contains(number))
+    {
+        return Ok(F1 + number - 1);
+    }
+    Err(format!(
+        "unknown key {name:?}. Use a single character, enter, esc, tab, backspace, delete, space, left, right, up, down, home, end, pageup, pagedown, f1 to f12, or a modifier name"
+    ))
+}
+
+/// Keysym for a modifier name such as `ctrl` or `cmd`.
+pub fn modifier_keysym(name: &str) -> Result<u32, String> {
+    let lower = name.trim().to_lowercase();
+    MODIFIERS
+        .iter()
+        .find(|(known, _)| *known == lower)
+        .map(|(_, keysym)| *keysym)
+        .ok_or_else(|| {
+            format!("unknown modifier {name:?}. Use ctrl, alt, shift, or super (also cmd, meta, win, option)")
+        })
+}
+
+/// A key to press, and whether Shift must be held with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyPress {
+    pub keycode: u8,
+    pub shift: bool,
+}
+
+/// The server's keyboard mapping: the keysyms of each keycode, level by level.
+#[derive(Debug, Clone)]
+pub struct Keymap {
+    first_keycode: u8,
+    per_keycode: usize,
+    keysyms: Vec<u32>,
+}
+
+impl Keymap {
+    /// `keysyms` holds `per_keycode` entries for each keycode from `first_keycode` on.
+    pub fn new(first_keycode: u8, per_keycode: u8, keysyms: Vec<u32>) -> Self {
+        Self {
+            first_keycode,
+            per_keycode: usize::from(per_keycode.max(1)),
+            keysyms,
+        }
+    }
+
+    fn rows(&self) -> impl Iterator<Item = (u8, &[u32])> {
+        self.keysyms
+            .chunks(self.per_keycode)
+            .enumerate()
+            .filter_map(|(index, row)| {
+                let keycode = u8::try_from(usize::from(self.first_keycode) + index).ok()?;
+                Some((keycode, row))
+            })
+    }
+
+    /// The key that produces `keysym` unshifted, or else with Shift. Keys that need
+    /// `AltGr` or another group are not used.
+    pub fn find(&self, keysym: u32) -> Option<KeyPress> {
+        for (level, shift) in [(0, false), (1, true)] {
+            if let Some((keycode, _)) = self.rows().find(|(_, row)| row.get(level) == Some(&keysym))
+            {
+                return Some(KeyPress { keycode, shift });
+            }
+        }
+        None
+    }
+
+    /// The highest keycode with no keysyms, free to bind temporarily.
+    pub fn spare(&self) -> Option<u8> {
+        self.rows()
+            .filter(|(_, row)| row.iter().all(|keysym| *keysym == 0))
+            .map(|(keycode, _)| keycode)
+            .last()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn characters_map_to_latin1_or_unicode_keysyms() {
+        assert_eq!(char_keysym('a'), Some(0x61));
+        assert_eq!(char_keysym('é'), Some(0xe9));
+        assert_eq!(char_keysym('→'), Some(0x0100_2192));
+        assert_eq!(char_keysym('😀'), Some(0x0101_f600));
+        assert_eq!(char_keysym('\n'), Some(RETURN));
+        assert_eq!(char_keysym('\u{7f}'), None);
+        assert_eq!(char_keysym('\r'), None);
+    }
+
+    #[test]
+    fn key_names_accept_aliases_and_ignore_case() {
+        for (name, keysym) in [
+            ("Enter", RETURN),
+            ("return", RETURN),
+            ("ESC", 0xff1b),
+            ("PageDown", 0xff56),
+            ("f1", 0xffbe),
+            ("F12", 0xffc9),
+            ("cmd", 0xffeb),
+            ("Option", 0xffe9),
+            ("A", 0x41),
+            ("+", 0x2b),
+        ] {
+            assert_eq!(key_keysym(name), Ok(keysym), "{name}");
+        }
+        assert!(key_keysym("f13").is_err());
+        assert!(key_keysym("enterr").is_err());
+    }
+
+    #[test]
+    fn modifiers_reject_ordinary_keys() {
+        assert_eq!(modifier_keysym("Ctrl"), Ok(0xffe3));
+        assert_eq!(modifier_keysym("win"), modifier_keysym("super"));
+        assert!(modifier_keysym("enter").is_err());
+    }
+
+    fn keymap() -> Keymap {
+        // keycodes 8..=11, two keysyms each: a/A, 1/!, only AltGr at level 3, empty
+        Keymap::new(
+            8,
+            4,
+            vec![
+                0x61, 0x41, 0, 0, //
+                0x31, 0x21, 0, 0, //
+                0, 0, 0x40, 0, //
+                0, 0, 0, 0,
+            ],
+        )
+    }
+
+    #[test]
+    fn find_prefers_unshifted_and_skips_altgr_levels() {
+        let keymap = keymap();
+        assert_eq!(
+            keymap.find(0x61),
+            Some(KeyPress {
+                keycode: 8,
+                shift: false
+            })
+        );
+        assert_eq!(
+            keymap.find(0x41),
+            Some(KeyPress {
+                keycode: 8,
+                shift: true
+            })
+        );
+        assert_eq!(
+            keymap.find(0x21),
+            Some(KeyPress {
+                keycode: 9,
+                shift: true
+            })
+        );
+        assert_eq!(keymap.find(0x40), None);
+        assert_eq!(keymap.find(0xe9), None);
+    }
+
+    #[test]
+    fn spare_is_the_highest_empty_keycode() {
+        assert_eq!(keymap().spare(), Some(11));
+        assert_eq!(Keymap::new(8, 2, vec![1, 0, 2, 0]).spare(), None);
+    }
+}

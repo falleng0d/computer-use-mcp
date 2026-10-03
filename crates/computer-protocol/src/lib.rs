@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub mod act;
+
+pub use act::{
+    ActReply, ActRequest, Action, ActionError, Button, Direction, Kind, Point, RawAction,
+};
+
+/// Version of the wire format between the host and `computerd`.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub const RELEASE_VERSION: Option<&str> = match option_env!("COMPUTER_USE_MCP_VERSION") {
     Some(version) if !version.is_empty() => Some(version),

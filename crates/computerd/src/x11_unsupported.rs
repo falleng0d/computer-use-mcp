@@ -5,6 +5,8 @@
 use anyhow::{Result, bail};
 use computer_protocol::{Cursor, ScreenSize};
 
+use crate::plan::{Input, WindowInfo};
+
 pub struct Capturer;
 
 impl Capturer {
@@ -29,6 +31,18 @@ impl Capturer {
     }
 
     pub fn grab(&mut self) -> Result<&[u8]> {
+        bail!("screens need Linux")
+    }
+
+    pub fn perform(&self, _input: &Input) -> Result<()> {
+        bail!("screens need Linux")
+    }
+
+    pub fn windows(&self) -> Result<Vec<WindowInfo>> {
+        bail!("screens need Linux")
+    }
+
+    pub fn activate(&self, _window: u32) -> Result<()> {
         bail!("screens need Linux")
     }
 }

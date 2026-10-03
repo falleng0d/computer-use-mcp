@@ -1,5 +1,12 @@
 mod api;
 mod frames;
+mod guard;
+#[cfg_attr(
+    all(not(target_os = "linux"), not(test)),
+    expect(dead_code, reason = "only the Linux screen types text")
+)]
+mod keys;
+mod plan;
 mod screen;
 mod sessions;
 #[cfg(target_os = "linux")]

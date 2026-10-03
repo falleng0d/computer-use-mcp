@@ -4,10 +4,10 @@ use std::{
     time::Duration,
 };
 
-use computer_protocol::{Observation, ScreenSize, SessionId, SessionTitle};
+use computer_protocol::{ActReply, ActRequest, Observation, ScreenSize, SessionId, SessionTitle};
 use tracing::{info, warn};
 
-use crate::screen::{Numbers, Screen};
+use crate::screen::{Numbers, Screen, ScreenError};
 
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(25);
 
@@ -18,6 +18,9 @@ pub enum SessionError {
     Unknown,
     #[error("all 16 screens are in use, wait for another agent to call end_session and try again")]
     NoFreeScreen,
+    /// The request cannot be run as given. The message tells the agent what to change.
+    #[error("{0}")]
+    Rejected(String),
     #[error("{0:#}")]
     Failed(anyhow::Error),
 }
@@ -85,6 +88,30 @@ impl Sessions {
     ///
     /// A screen that died or hung is closed and reopened by the next call.
     pub async fn observe(&self, id: &SessionId) -> Result<Observation, SessionError> {
+        self.with_screen(id, OBSERVE_TIMEOUT, async |screen| {
+            Ok(screen.observe().await?)
+        })
+        .await
+    }
+
+    /// Runs a batch of actions on the session's screen, opening it first when needed.
+    ///
+    /// Batches of one session run one at a time, in the order they arrive.
+    pub async fn act(&self, id: &SessionId, request: ActRequest) -> Result<ActReply, SessionError> {
+        let budget = request.time_budget();
+        self.with_screen(id, budget, async |screen| screen.act(request).await)
+            .await
+    }
+
+    /// Runs `call` on the session's screen while holding the session's screen lock.
+    ///
+    /// A screen that fails the call and is found dead, or that exceeds `timeout`, is closed.
+    async fn with_screen<T>(
+        &self,
+        id: &SessionId,
+        timeout: Duration,
+        call: impl AsyncFnOnce(&mut Screen) -> Result<T, ScreenError>,
+    ) -> Result<T, SessionError> {
         let session = self.get(id)?;
         let mut slot = session.screen.lock().await;
         if matches!(*slot, Slot::Closed) {
@@ -101,16 +128,14 @@ impl Sessions {
         let Slot::Open(screen) = &mut *slot else {
             unreachable!("the slot was opened above");
         };
-        let failure = match tokio::time::timeout(OBSERVE_TIMEOUT, screen.observe()).await {
-            Ok(Ok(observation)) => return Ok(observation),
-            Ok(Err(error)) => match screen.check_alive() {
+        let failure = match tokio::time::timeout(timeout, call(screen)).await {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(ScreenError::Rejected(message))) => return Err(SessionError::Rejected(message)),
+            Ok(Err(ScreenError::Failed(error))) => match screen.check_alive() {
                 Ok(()) => return Err(SessionError::Failed(error)),
                 Err(dead) => dead,
             },
-            Err(_) => anyhow::anyhow!(
-                "taking the screenshot timed out after {} s",
-                OBSERVE_TIMEOUT.as_secs()
-            ),
+            Err(_) => anyhow::anyhow!("the call timed out after {} s", timeout.as_secs()),
         };
         warn!(session = %id, error = %format!("{failure:#}"), "closing a broken screen");
         *slot = match std::mem::replace(&mut *slot, Slot::Unopened) {
