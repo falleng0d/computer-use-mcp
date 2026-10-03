@@ -1,0 +1,4 @@
+[begin] (Computer)
+  [exec] (Browser) {computerd open-browser}
+  [exec] (Terminal) {xterm}
+[end]

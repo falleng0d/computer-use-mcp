@@ -7,12 +7,14 @@ use des::{
 use serde::{Deserialize, Serialize};
 
 pub mod act;
+mod desktop;
 mod files;
 mod shell;
 
 pub use act::{
     ActReply, ActRequest, Action, ActionError, Button, Direction, Kind, Point, RawAction,
 };
+pub use desktop::{LaunchAppRequest, OpenPathRequest};
 pub use files::{
     FileEntry, FileKind, ImageType, ListFilesReply, ListFilesRequest, MAX_IMAGE_BYTES,
     MAX_WRITE_BYTES, ReadFileReply, ReadFileRequest, WriteFileReply, WriteFileRequest,
@@ -24,7 +26,7 @@ pub use shell::{
 };
 
 /// Version of the wire format between the host and `computerd`.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 pub const RELEASE_VERSION: Option<&str> = match option_env!("COMPUTER_USE_MCP_VERSION") {
     Some(version) if !version.is_empty() => Some(version),

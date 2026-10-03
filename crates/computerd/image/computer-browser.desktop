@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Browser
+Exec=computerd open-browser %U
+Icon=chromium
+MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
+NoDisplay=true

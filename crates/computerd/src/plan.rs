@@ -43,7 +43,10 @@ pub enum Input {
 pub enum Step {
     Input(Input),
     Wait(Duration),
-    Focus(String),
+    Focus {
+        application: String,
+        uri: Option<String>,
+    },
 }
 
 fn check_point(point: Point, size: ScreenSize, number: usize) -> Result<(), String> {
@@ -134,7 +137,12 @@ fn plan_one(number: usize, action: &Action, size: ScreenSize) -> Result<Step, St
             amount: *amount,
         },
         Action::Wait { ms } => return Ok(Step::Wait(Duration::from_millis(u64::from(*ms)))),
-        Action::Focus { application, .. } => return Ok(Step::Focus(application.clone())),
+        Action::Focus { application, uri } => {
+            return Ok(Step::Focus {
+                application: application.clone(),
+                uri: uri.clone(),
+            });
+        }
     };
     Ok(Step::Input(input))
 }

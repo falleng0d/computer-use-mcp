@@ -2,10 +2,11 @@ use std::{num::NonZeroU32, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use computer_protocol::{
-    ActReply, ActRequest, ApiError, CreateSession, Health, ListFilesReply, ListFilesRequest,
-    Observation, OwnerId, PROTOCOL_VERSION, ReadFileReply, ReadFileRequest, ScreenSize,
-    SessionCreated, SessionId, SessionTitle, SetCwdReply, SetCwdRequest, ShellReply, ShellRequest,
-    ShellTimeouts, VERSION, ViewerInfo, WriteFileReply, WriteFileRequest,
+    ActReply, ActRequest, ApiError, CreateSession, Health, LaunchAppRequest, ListFilesReply,
+    ListFilesRequest, Observation, OpenPathRequest, OwnerId, PROTOCOL_VERSION, ReadFileReply,
+    ReadFileRequest, ScreenSize, SessionCreated, SessionId, SessionTitle, SetCwdReply,
+    SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts, VERSION, ViewerInfo, WriteFileReply,
+    WriteFileRequest,
 };
 use reqwest::StatusCode;
 
@@ -18,6 +19,8 @@ const ACT_MARGIN: Duration = Duration::from_secs(120);
 /// Time on top of a command's own timeout for killing it and for the HTTP round trip.
 const SHELL_MARGIN: Duration = Duration::from_secs(30);
 const FILE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Longest wait for `computerd` to start an application or a page, which includes starting the browser.
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(100);
 const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const HEALTH_DEADLINE: Duration = Duration::from_secs(60);
 /// Longest wait for `computerd` when the MCP server is shutting down.
@@ -206,6 +209,43 @@ impl Client {
             .json()
             .await
             .context("reading the screenshot reply")
+    }
+
+    /// Opens a file or an http(s) URL on the session's screen and returns a screenshot.
+    ///
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub async fn open_path(&self, session: &SessionId, path: String) -> Result<Observation> {
+        let response = self
+            .http
+            .post(format!("{}/sessions/{session}/open", self.base))
+            .bearer_auth(&self.token)
+            .timeout(LAUNCH_TIMEOUT)
+            .json(&OpenPathRequest { path })
+            .send()
+            .await
+            .context("asking the computer to open the path")?;
+        read_reply(response, "reading the screenshot reply").await
+    }
+
+    /// Starts or raises an application on the session's screen and returns a screenshot.
+    ///
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub async fn launch_app(
+        &self,
+        session: &SessionId,
+        application: String,
+        uri: Option<String>,
+    ) -> Result<Observation> {
+        let response = self
+            .http
+            .post(format!("{}/sessions/{session}/launch", self.base))
+            .bearer_auth(&self.token)
+            .timeout(LAUNCH_TIMEOUT)
+            .json(&LaunchAppRequest { application, uri })
+            .send()
+            .await
+            .context("asking the computer to launch the application")?;
+        read_reply(response, "reading the screenshot reply").await
     }
 
     /// Runs a batch of actions on the session's screen.

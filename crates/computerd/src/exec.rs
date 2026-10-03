@@ -15,15 +15,16 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::cap::Capture;
+use crate::{
+    cap::Capture,
+    env::{self, SHELL},
+};
 
 /// Time the pipes get to reach end of file after the shell exits. A background job that
 /// kept them open is not waited for.
 const DRAIN_GRACE: Duration = Duration::from_millis(300);
 const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_CHUNK: usize = 8192;
-const DEFAULT_USER: &str = "computer";
-const SHELL: &str = "/bin/bash";
 
 /// One command to run.
 pub struct Job {
@@ -33,33 +34,6 @@ pub struct Job {
     pub timeout: Duration,
     /// Kills the command when cancelled.
     pub cancel: CancellationToken,
-}
-
-/// Environment of a command: a few variables taken from the daemon's own, never its secrets.
-pub fn environment(
-    parent: impl Fn(&str) -> Option<String>,
-    display: Option<u8>,
-) -> Vec<(&'static str, String)> {
-    let user = parent("USER").unwrap_or_else(|| DEFAULT_USER.to_owned());
-    let mut env = vec![
-        (
-            "HOME",
-            parent("HOME").unwrap_or_else(|| format!("/home/{DEFAULT_USER}")),
-        ),
-        ("LOGNAME", user.clone()),
-        ("USER", user),
-        ("SHELL", SHELL.to_owned()),
-        ("TERM", "dumb".to_owned()),
-    ];
-    for name in ["PATH", "LANG", "LC_ALL", "TZ"] {
-        if let Some(value) = parent(name) {
-            env.push((name, value));
-        }
-    }
-    if let Some(number) = display {
-        env.push(("DISPLAY", format!(":{number}")));
-    }
-    env
 }
 
 /// Kills the process group when dropped while armed, so a dropped call leaves nothing running.
@@ -108,7 +82,7 @@ pub async fn run(job: Job) -> anyhow::Result<ShellReply> {
         .args(["-lc", &job.command])
         .current_dir(&job.cwd)
         .env_clear()
-        .envs(environment(|name| std::env::var(name).ok(), job.display))
+        .envs(env::from_process(job.display))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -197,27 +171,6 @@ mod tests {
             .output()
             .unwrap()
             .stdout
-    }
-
-    #[test]
-    fn environment_passes_the_login_basics_and_never_the_token() {
-        let parent = |name: &str| match name {
-            "PATH" => Some("/usr/bin".to_owned()),
-            "HOME" => Some("/home/computer".to_owned()),
-            "COMPUTERD_TOKEN" => Some("secret".to_owned()),
-            _ => None,
-        };
-        let with_screen = environment(parent, Some(3));
-        let get = |env: &[(&str, String)], key: &str| {
-            env.iter()
-                .find(|(name, _)| *name == key)
-                .map(|(_, value)| value.clone())
-        };
-        assert_eq!(get(&with_screen, "DISPLAY"), Some(":3".to_owned()));
-        assert_eq!(get(&with_screen, "USER"), Some("computer".to_owned()));
-        assert_eq!(get(&with_screen, "PATH"), Some("/usr/bin".to_owned()));
-        assert_eq!(get(&with_screen, "COMPUTERD_TOKEN"), None);
-        assert_eq!(get(&environment(parent, None), "DISPLAY"), None);
     }
 
     #[tokio::test]

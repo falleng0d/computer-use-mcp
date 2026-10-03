@@ -78,6 +78,14 @@ Every viewer goes through `computerd`, which checks the key, refuses page reques
 
 The base port is a setting of the computer, read when the computer is created. Two computers on the same machine need different bases, for example `COMPUTER_USE_NAME=other COMPUTER_USE_PORT_BASE=21900`. If a port is taken, `start_computer` says which one and names the setting. A computer that already exists keeps its ports. Remove it with `docker rm` (home stays) to create it again with another base.
 
+## Apps and pages
+
+- `open_path` opens an http(s) URL or a file on the session's screen and returns a screenshot. Pages, and HTML, PDF, image, text, JSON, and XML files, open in the screen's Chromium. Other files open with their default application (`xdg-open`).
+- `launch_app` starts an application on the session's screen, or raises its window when one is open, then returns a screenshot. It takes `browser`, `terminal`, the name of an installed application (a `.desktop` entry), or a program on `PATH`. A `uri` is opened in the application, and the browser opens it in a new tab. The `focus` action of `computer_act` does the same when no window matches.
+- Every screen has its own Chromium with uBlock Origin Lite, which installs itself from the Chrome Web Store within a minute of the first start. The user can disable it. The Chromium starts the first time something needs a browser on that screen, and closes with the screen so its profile is saved. The profile is kept in home, per screen number, so logins survive later sessions on the same number.
+- The Chromium runs without its own sandbox, because Docker's default seccomp profile blocks the user namespaces that sandbox needs. The container is the boundary. DevTools listens on `127.0.0.1` inside the container only, on port 9221 plus the screen number.
+- The right-click menu of a screen offers Browser and Terminal. Both open on that screen. `xdg-open` of a web link inside the computer opens it in that screen's Chromium too.
+
 ## Opening the viewer
 
 The viewer opens by itself the first time a session's screen opens, so the user sees the agent work without any step. `COMPUTER_USE_OPEN` picks how, per MCP server process.

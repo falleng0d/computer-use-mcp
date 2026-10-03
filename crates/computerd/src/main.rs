@@ -1,5 +1,9 @@
 mod api;
+mod apps;
+mod bridge;
+mod browser;
 mod cap;
+mod env;
 #[cfg(target_os = "linux")]
 mod exec;
 #[cfg(not(target_os = "linux"))]
@@ -39,6 +43,19 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 const NOVNC_DIR: &str = "/opt/novnc";
+const OPEN_BROWSER_COMMAND: &str = "open-browser";
+
+/// `computerd open-browser [url]`: shows the browser of the screen named by `DISPLAY`.
+/// Programs on a screen run it, such as the Fluxbox menu and `xdg-open`.
+async fn open_browser(url: Option<String>) -> anyhow::Result<()> {
+    let display = std::env::var("DISPLAY").context("DISPLAY is not set")?;
+    let screen = display
+        .strip_prefix(':')
+        .and_then(|rest| rest.split('.').next())
+        .and_then(|number| number.parse().ok())
+        .with_context(|| format!("DISPLAY={display} is not one of the computer's screens"))?;
+    bridge::ask(&bridge::Request { screen, url }).await
+}
 
 /// Host port the viewer page is published on, as `start_computer` passed it in.
 fn host_base(value: Option<&str>) -> u16 {
@@ -52,6 +69,10 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some(OPEN_BROWSER_COMMAND) {
+        return open_browser(args.next()).await;
+    }
     let token = std::env::var(TOKEN_ENV)
         .ok()
         .filter(|token| !token.is_empty())
@@ -64,6 +85,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("preparing the viewer password")?
         .context("preparing the viewer password")?;
+    let launcher = tokio::net::TcpListener::bind(("127.0.0.1", bridge::PORT))
+        .await
+        .with_context(|| format!("listening on 127.0.0.1:{}", bridge::PORT))?;
     let addr = SocketAddr::from(([0, 0, 0, 0], API_PORT));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -87,6 +111,11 @@ async fn main() -> anyhow::Result<()> {
         let stop = stop_reaper.clone();
         tokio::spawn(async move { sessions.reap_until(stop).await })
     };
+    let bridge = tokio::spawn(bridge::serve(
+        launcher,
+        sessions.clone(),
+        stop_reaper.clone(),
+    ));
     let stopping = sessions.clone();
     let served = axum::serve(listener, api::router(token, key, sessions.clone()))
         .with_graceful_shutdown(async move {
@@ -97,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
         .context("serving the API");
     stop_reaper.cancel();
     reaper.await.context("stopping the session reaper")?;
+    bridge.await.context("stopping the browser bridge")?;
     viewer.stop().await;
     sessions.close_all().await;
     served

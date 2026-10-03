@@ -219,6 +219,24 @@ pub struct ShellArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct OpenPathArgs {
+    /// Session id returned by `start_computer`.
+    session: String,
+    /// An http(s) URL, or a file path. A relative path starts at your working folder, `~` is home.
+    path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LaunchAppArgs {
+    /// Session id returned by `start_computer`.
+    session: String,
+    /// What to launch: `browser`, `terminal`, the name of an installed application, or a program on `PATH`.
+    application: String,
+    /// A page or file the application should open, when it takes one.
+    uri: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SetCwdArgs {
     /// Session id returned by `start_computer`.
     session: String,
@@ -452,6 +470,32 @@ impl Server {
         }
     }
 
+    async fn open(&self, args: OpenPathArgs) -> anyhow::Result<CallToolResult> {
+        let (session, endpoint) = self.endpoint_for(&args.session).await?;
+        match Client::new(&endpoint)?.open_path(&session, args.path).await {
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
+            other => other.map(|observation| {
+                self.announce(&endpoint, observation.opened_screen);
+                observation::tool_result(observation)
+            }),
+        }
+    }
+
+    async fn launch(&self, args: LaunchAppArgs) -> anyhow::Result<CallToolResult> {
+        let (session, endpoint) = self.endpoint_for(&args.session).await?;
+        let client = Client::new(&endpoint)?;
+        match client
+            .launch_app(&session, args.application, args.uri)
+            .await
+        {
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
+            other => other.map(|observation| {
+                self.announce(&endpoint, observation.opened_screen);
+                observation::tool_result(observation)
+            }),
+        }
+    }
+
     /// Opens the viewer when the call opened a screen, without waiting for it.
     fn announce(&self, endpoint: &Endpoint, opened_screen: Option<u8>) {
         if let Some(screen) = opened_screen {
@@ -586,7 +630,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Act on your own screen with up to 24 ordered actions, optionally ending with a screenshot. Coordinates are pixels from the top left of the latest screenshot. Actions: click {x, y, button?: left|right|middle, double?}, move {x, y}, down/up {x?, y?, button?} to drag, type {text} for any Unicode text (a newline presses Enter), key {key, modifiers?} for keys like enter, esc, tab, backspace, delete, space, arrows, home, end, pageup, pagedown, f1 to f12 or a single character with modifiers ctrl, alt, shift, super (also cmd, option), scroll {x?, y?, direction: up|down|left|right, amount? 1 to 20, default 3}, wait {ms? up to 5000, default 350}, focus {application} to raise an already open window by name or title. Batch only predictable actions and stop before an outcome you need to inspect. By default the batch ends with a screenshot taken settle_ms (default 300) after the last action; set observe to false to skip it. Repeating the same scroll, pointer, or key batch after it changed nothing is refused on the 4th try, so change your approach."
+        description = "Act on your own screen with up to 24 ordered actions, optionally ending with a screenshot. Coordinates are pixels from the top left of the latest screenshot. Actions: click {x, y, button?: left|right|middle, double?}, move {x, y}, down/up {x?, y?, button?} to drag, type {text} for any Unicode text (a newline presses Enter), key {key, modifiers?} for keys like enter, esc, tab, backspace, delete, space, arrows, home, end, pageup, pagedown, f1 to f12 or a single character with modifiers ctrl, alt, shift, super (also cmd, option), scroll {x?, y?, direction: up|down|left|right, amount? 1 to 20, default 3}, wait {ms? up to 5000, default 350}, focus {application, uri?} to raise an open window by name or title, or start the application (and open the uri in it) when none matches. Batch only predictable actions and stop before an outcome you need to inspect. By default the batch ends with a screenshot taken settle_ms (default 300) after the last action; set observe to false to skip it. Repeating the same scroll, pointer, or key batch after it changed nothing is refused on the 4th try, so change your approach."
     )]
     async fn computer_act(
         &self,
@@ -596,6 +640,36 @@ impl Server {
         result.map_err(|error| {
             let message = format!("{error:#}");
             error!(tool = "computer_act", error = %message, "tool call failed");
+            message
+        })
+    }
+
+    #[tool(
+        description = "Open a file or a web page on your screen and get a screenshot of the result. An http(s) URL opens in a new tab of your screen's Chromium, which blocks ads with uBlock Origin Lite. A path (relative paths start at your working folder, `~` is home) opens with its default application. HTML, PDF, image, text, JSON and XML files open in Chromium. Opens your screen on your first call. The page may still be loading, so call computer_observe again if the screenshot looks unfinished."
+    )]
+    async fn open_path(
+        &self,
+        Parameters(args): Parameters<OpenPathArgs>,
+    ) -> Result<CallToolResult, String> {
+        let result = self.open(args).await;
+        result.map_err(|error| {
+            let message = format!("{error:#}");
+            error!(tool = "open_path", error = %message, "tool call failed");
+            message
+        })
+    }
+
+    #[tool(
+        description = "Start an application on your screen, or raise it when a window of it is already open, then get a screenshot. `application` is `browser` (your screen's Chromium), `terminal`, the name of an installed application, or a program on PATH. `uri` is a page or file for the application to open, and it always starts or reuses the application with it. Opens your screen on your first call."
+    )]
+    async fn launch_app(
+        &self,
+        Parameters(args): Parameters<LaunchAppArgs>,
+    ) -> Result<CallToolResult, String> {
+        let result = self.launch(args).await;
+        result.map_err(|error| {
+            let message = format!("{error:#}");
+            error!(tool = "launch_app", error = %message, "tool call failed");
             message
         })
     }
@@ -1084,6 +1158,53 @@ mod tests {
             "timeout": timeout,
         }))
         .unwrap()
+    }
+
+    fn open_args(session: &SessionId, path: &str) -> OpenPathArgs {
+        serde_json::from_value(serde_json::json!({
+            "session": session.as_str(),
+            "path": path,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Docker"]
+    async fn opening_a_page_shows_chromium_and_ending_the_session_closes_it_cleanly() {
+        let (server, _cleanup) = fresh_server();
+        let page = server.start("page").await.unwrap().session;
+        let watcher = server.start("watcher").await.unwrap().session;
+        let shell = async |command: &str| {
+            let result = server
+                .run_shell(shell_args(&watcher, command, Some(30)))
+                .await
+                .unwrap();
+            text_of(&result)
+        };
+
+        let opened = server
+            .open(open_args(&page, "https://example.com"))
+            .await
+            .unwrap();
+        assert!(
+            text_of(&opened).contains("Chromium"),
+            "{}",
+            text_of(&opened)
+        );
+        assert!(shell("pgrep -x chromium").await.contains("exit code: 0"));
+        let profile = "/home/computer/.local/share/computer-use/chromium/screen-1";
+        assert!(
+            shell(&format!("test -d {profile}"))
+                .await
+                .contains("exit code: 0")
+        );
+
+        server.end(page.as_str()).await.unwrap();
+        let after = shell(&format!(
+            "pgrep -c chromium; ls -A {profile} | grep -c '^Singleton'; true"
+        ))
+        .await;
+        assert!(after.contains("--- stdout ---\n0\n0\n"), "{after}");
     }
 
     #[tokio::test]

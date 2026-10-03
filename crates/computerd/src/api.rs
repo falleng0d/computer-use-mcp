@@ -9,10 +9,10 @@ use axum::{
     routing::{delete, get, post},
 };
 use computer_protocol::{
-    ActReply, ActRequest, ApiError, CreateSession, Health, ListFilesReply, ListFilesRequest,
-    Observation, OwnerId, PROTOCOL_VERSION, ReadFileReply, ReadFileRequest, SCREEN_COUNT,
-    SessionCreated, SessionId, SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, VERSION,
-    ViewerInfo, WriteFileReply, WriteFileRequest,
+    ActReply, ActRequest, ApiError, CreateSession, Health, LaunchAppRequest, ListFilesReply,
+    ListFilesRequest, Observation, OpenPathRequest, OwnerId, PROTOCOL_VERSION, ReadFileReply,
+    ReadFileRequest, SCREEN_COUNT, SessionCreated, SessionId, SetCwdReply, SetCwdRequest,
+    ShellReply, ShellRequest, VERSION, ViewerInfo, WriteFileReply, WriteFileRequest,
 };
 use tracing::error;
 use uuid::Uuid;
@@ -46,6 +46,8 @@ pub fn router(token: String, key: String, sessions: Sessions) -> Router {
         .route("/owners/{owner}/heartbeat", post(heartbeat))
         .route("/sessions/{id}/observe", post(observe))
         .route("/sessions/{id}/act", post(act))
+        .route("/sessions/{id}/open", post(open_path))
+        .route("/sessions/{id}/launch", post(launch_app))
         .route("/sessions/{id}/shell", post(shell))
         .route("/sessions/{id}/cwd", post(set_cwd))
         .route("/sessions/{id}/files/list", post(list_files))
@@ -146,6 +148,22 @@ async fn act(
     Json(request): Json<ActRequest>,
 ) -> Result<Json<ActReply>, SessionError> {
     state.sessions.act(&id, request).await.map(Json)
+}
+
+async fn open_path(
+    State(state): State<AppState>,
+    Path(id): Path<SessionId>,
+    Json(request): Json<OpenPathRequest>,
+) -> Result<Json<Observation>, SessionError> {
+    state.sessions.open_path(&id, request).await.map(Json)
+}
+
+async fn launch_app(
+    State(state): State<AppState>,
+    Path(id): Path<SessionId>,
+    Json(request): Json<LaunchAppRequest>,
+) -> Result<Json<Observation>, SessionError> {
+    state.sessions.launch_app(&id, request).await.map(Json)
 }
 
 async fn shell(

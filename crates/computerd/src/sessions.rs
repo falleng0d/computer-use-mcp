@@ -9,10 +9,10 @@ use std::{
 };
 
 use computer_protocol::{
-    ActReply, ActRequest, CreateSession, DEFAULT_PORT_BASE, ListFilesReply, ListFilesRequest,
-    Observation, OwnerId, ReadFileReply, ReadFileRequest, ScreenSize, SessionId, SessionTitle,
-    SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts, WriteFileReply,
-    WriteFileRequest,
+    ActReply, ActRequest, CreateSession, DEFAULT_PORT_BASE, LaunchAppRequest, ListFilesReply,
+    ListFilesRequest, Observation, OpenPathRequest, OwnerId, ReadFileReply, ReadFileRequest,
+    ScreenSize, SessionId, SessionTitle, SetCwdReply, SetCwdRequest, ShellReply, ShellRequest,
+    ShellTimeouts, WriteFileReply, WriteFileRequest,
 };
 use serde::Serialize;
 use tokio::{task::JoinHandle, time::Instant};
@@ -28,6 +28,8 @@ use crate::{
 };
 
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(25);
+/// Longest an open or launch call may take, which covers starting the browser.
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(75);
 const REAP_INTERVAL: Duration = Duration::from_secs(1);
 /// How many sessions that ended on their own are remembered to tell agents why.
 const ENDED_MEMORY: usize = 256;
@@ -432,11 +434,65 @@ impl Sessions {
     /// Batches of one session run one at a time, in the order they arrive.
     pub async fn act(&self, id: &SessionId, request: ActRequest) -> Result<ActReply, SessionError> {
         let budget = request.time_budget();
+        let cwd = self.cwd_of(id)?;
         let (mut reply, opened_screen) = self
-            .with_screen(id, budget, async |screen| screen.act(request).await)
+            .with_screen(id, budget, async |screen| screen.act(request, &cwd).await)
             .await?;
         reply.opened_screen = opened_screen;
         Ok(reply)
+    }
+
+    fn cwd_of(&self, id: &SessionId) -> Result<PathBuf, SessionError> {
+        Ok(lock(&self.get(id)?.cwd).clone())
+    }
+
+    /// Opens a file or an http(s) URL on the session's screen, opening the screen first when needed.
+    pub async fn open_path(
+        &self,
+        id: &SessionId,
+        request: OpenPathRequest,
+    ) -> Result<Observation, SessionError> {
+        let cwd = self.cwd_of(id)?;
+        let (mut observation, opened_screen) = self
+            .with_screen(id, LAUNCH_TIMEOUT, async |screen| {
+                screen.open_path(&request.path, &cwd).await
+            })
+            .await?;
+        observation.opened_screen = opened_screen;
+        Ok(observation)
+    }
+
+    /// Starts or raises an application on the session's screen, opening the screen first when needed.
+    pub async fn launch_app(
+        &self,
+        id: &SessionId,
+        request: LaunchAppRequest,
+    ) -> Result<Observation, SessionError> {
+        let cwd = self.cwd_of(id)?;
+        let (mut observation, opened_screen) = self
+            .with_screen(id, LAUNCH_TIMEOUT, async |screen| {
+                screen
+                    .launch_app(&request.application, request.uri.as_deref(), &cwd)
+                    .await
+            })
+            .await?;
+        observation.opened_screen = opened_screen;
+        Ok(observation)
+    }
+
+    /// Shows the browser of an open screen, starting it when it is not running.
+    pub async fn show_browser(&self, screen: u8, url: Option<String>) -> Result<(), SessionError> {
+        let id = self
+            .lock()
+            .iter()
+            .find(|(_, session)| session.screen() == Some(screen))
+            .map(|(id, _)| id.clone())
+            .ok_or_else(|| SessionError::Rejected(format!("screen {screen} is not in use")))?;
+        self.with_screen(&id, LAUNCH_TIMEOUT, async |screen| {
+            screen.show_in_browser(url.as_deref()).await
+        })
+        .await
+        .map(|_| ())
     }
 
     /// Runs `call` on the session's screen while holding the session's screen lock.

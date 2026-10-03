@@ -31,6 +31,9 @@ pub const MAX_TYPE_CHARS: usize = 1000;
 /// Time `computerd` may spend on top of the waits and typing of a batch before giving up.
 const WORK_ALLOWANCE: Duration = Duration::from_secs(30);
 
+/// Time a `focus` action may take when it has to start an application.
+const LAUNCH_ALLOWANCE: Duration = Duration::from_secs(40);
+
 /// Time applications get to reread the keyboard after a temporary key binding changes.
 pub const KEYMAP_SETTLE: Duration = Duration::from_millis(20);
 
@@ -119,7 +122,7 @@ pub struct ActRequest {
 }
 
 impl ActRequest {
-    /// Longest the batch can take: its waits, the settle time, typing, and a fixed allowance for the rest.
+    /// Longest the batch can take: its waits, the settle time, typing, launches, and a fixed allowance for the rest.
     #[must_use]
     pub fn time_budget(&self) -> Duration {
         let mut budget = WORK_ALLOWANCE + Duration::from_millis(u64::from(self.settle_ms));
@@ -130,6 +133,7 @@ impl ActRequest {
                     budget += TYPE_CHAR_ALLOWANCE
                         * u32::try_from(text.chars().count()).unwrap_or(u32::MAX);
                 }
+                Action::Focus { .. } => budget += LAUNCH_ALLOWANCE,
                 _ => {}
             }
         }
@@ -205,9 +209,9 @@ pub struct RawAction {
     pub amount: Option<f64>,
     /// For wait: milliseconds, up to 5000. Default 350.
     pub ms: Option<f64>,
-    /// For focus: name or title of an open window to raise, matched without regard to case.
+    /// For focus: name or title of an open window to raise, matched without regard to case. Also names an application to start when no window matches.
     pub application: Option<String>,
-    /// For focus: reserved, currently ignored.
+    /// For focus: a page or file to open in the application. The application is started or reused with it.
     pub uri: Option<String>,
 }
 

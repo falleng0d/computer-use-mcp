@@ -17,6 +17,8 @@ check unzip -v
 check xclip -version
 check xdpyinfo -version
 check xterm -version
+check chromium --version
+check xdg-open --version
 check Xvnc -help
 check python3 -m venv --help
 check sudo -n true

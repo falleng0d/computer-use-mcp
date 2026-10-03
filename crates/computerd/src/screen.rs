@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
     time::Duration,
@@ -15,10 +15,13 @@ use tokio::process::{Child, Command};
 use tracing::{info, warn};
 
 use crate::{
+    apps::{self, App},
+    browser::{self, Browser, Target},
+    env,
     frames::{self, FrameTracker},
     guard::{LoopGuard, Outcome},
     key,
-    plan::{self, Input, Step},
+    plan::{self, Input, Step, WindowInfo},
     workdir,
     x11::Capturer,
 };
@@ -34,6 +37,16 @@ const WM_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest wait for a window to appear after something is started.
+const WINDOW_TIMEOUT: Duration = Duration::from_secs(5);
+const WINDOW_POLL: Duration = Duration::from_millis(100);
+/// Pause after a page is handed to the browser, so it can start to load before the screenshot.
+const PAGE_SETTLE: Duration = Duration::from_millis(2000);
+/// Pause after an application starts, so its first window can paint before the screenshot.
+const APP_SETTLE: Duration = Duration::from_millis(700);
+const BROWSER_CLASS: &str = "chromium";
+const TERMINAL_CLASS: &str = "xterm";
+const OPEN_COMMAND: &str = "xdg-open";
 
 /// Pause after each input step so the window manager and applications handle it before the next one.
 const STEP_GAP: Duration = Duration::from_millis(30);
@@ -152,6 +165,8 @@ impl Processes {
             .args(["-localhost", "-rfbport", &xvnc_port.to_string()])
             .args(["-SecurityTypes", "VncAuth", "-rfbauth"])
             .arg(password_file)
+            .env_clear()
+            .envs(env::from_process(None))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .kill_on_drop(true)
@@ -167,6 +182,8 @@ impl Processes {
     fn start_fluxbox(&mut self) -> Result<()> {
         let fluxbox = Command::new("fluxbox")
             .args(["-display", &display(self.number), "-rc", FLUXBOX_INIT])
+            .env_clear()
+            .envs(env::from_process(Some(self.number)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .kill_on_drop(true)
@@ -219,6 +236,10 @@ pub struct Screen {
     processes: Processes,
     source: Arc<Mutex<Source>>,
     guard: LoopGuard,
+    /// Chromium of this screen, started the first time something needs a browser.
+    browser: Option<Browser>,
+    /// Applications started on this screen that may still run.
+    apps: Vec<Child>,
 }
 
 /// Everything a capture touches, locked together inside `spawn_blocking`.
@@ -242,6 +263,8 @@ impl Screen {
                     processes,
                     source,
                     guard: LoopGuard::default(),
+                    browser: None,
+                    apps: Vec::new(),
                 })
             }
             Err(error) => {
@@ -309,7 +332,7 @@ impl Screen {
     /// Runs a batch of actions in order, then takes the closing screenshot when asked.
     ///
     /// Nothing runs when the batch is invalid or repeats a batch that already changed nothing.
-    pub async fn act(&mut self, request: ActRequest) -> Result<ActReply, ScreenError> {
+    pub async fn act(&mut self, request: ActRequest, cwd: &Path) -> Result<ActReply, ScreenError> {
         let steps = plan::plan(&request.actions, self.size).map_err(ScreenError::Rejected)?;
         let inputs: Vec<Input> = steps
             .iter()
@@ -328,7 +351,7 @@ impl Screen {
         }
         let total = steps.len();
         for (index, step) in steps.into_iter().enumerate() {
-            if let Err(error) = self.run_step(step).await {
+            if let Err(error) = self.run_step(step, cwd).await {
                 self.guard.reset();
                 self.release_held().await;
                 return Err(error.at_step(index + 1, total));
@@ -404,7 +427,7 @@ impl Screen {
         .context("checking the screen")?
     }
 
-    async fn run_step(&self, step: Step) -> Result<(), ScreenError> {
+    async fn run_step(&mut self, step: Step, cwd: &Path) -> Result<(), ScreenError> {
         let source = Arc::clone(&self.source);
         match step {
             Step::Wait(duration) => {
@@ -425,36 +448,306 @@ impl Screen {
                 .await
                 .context("running the action")??;
             }
-            Step::Focus(application) => {
-                let target = application.clone();
-                let open: Option<Vec<String>> = tokio::task::spawn_blocking(move || {
-                    let guard = source
-                        .lock()
-                        .expect("the capture lock is only held inside spawn_blocking");
-                    let windows = guard.capturer.windows()?;
-                    match plan::pick_window(&windows, &target) {
-                        Some(window) => guard.capturer.activate(window.id).map(|()| None),
-                        None => Ok(Some(
-                            windows.iter().map(plan::WindowInfo::describe).collect(),
-                        )),
-                    }
-                })
-                .await
-                .context("focusing the window")??;
-                if let Some(open) = open {
-                    return Err(no_window(&application, &open));
-                }
+            Step::Focus { application, uri } => {
+                self.focus_or_launch(&application, uri.as_deref(), cwd)
+                    .await?;
             }
         }
         tokio::time::sleep(STEP_GAP).await;
         Ok(())
     }
 
-    /// Stops the screen's processes. The screen number frees when `self` drops.
-    pub async fn close(self) {
+    /// Closes the browser, kills the applications, and stops the screen's processes.
+    /// The screen number frees when `self` drops.
+    pub async fn close(mut self) {
         info!(screen = self.number, "closing screen");
+        if let Some(browser) = self.browser.take() {
+            browser.close().await;
+        }
+        for mut app in std::mem::take(&mut self.apps) {
+            if app.start_kill().is_ok() {
+                let _ = tokio::time::timeout(STOP_TIMEOUT, app.wait()).await;
+            }
+        }
         self.processes.stop().await;
     }
+
+    /// Windows the window manager lists now.
+    async fn windows(&self) -> Result<Vec<WindowInfo>> {
+        let source = Arc::clone(&self.source);
+        tokio::task::spawn_blocking(move || {
+            source
+                .lock()
+                .expect("the capture lock is only held inside spawn_blocking")
+                .capturer
+                .windows()
+        })
+        .await
+        .context("listing the windows")?
+    }
+
+    async fn raise(&self, window: u32) -> Result<()> {
+        let source = Arc::clone(&self.source);
+        tokio::task::spawn_blocking(move || {
+            source
+                .lock()
+                .expect("the capture lock is only held inside spawn_blocking")
+                .capturer
+                .activate(window)
+        })
+        .await
+        .context("raising the window")?
+    }
+
+    /// Opens a file or an http(s) URL, then returns a screenshot.
+    ///
+    /// Pages and files Chromium shows go to the screen's browser. Other files open with their default application.
+    pub async fn open_path(&mut self, input: &str, cwd: &Path) -> Result<Observation, ScreenError> {
+        let target =
+            browser::classify(input, cwd, &workdir::home_dir()).map_err(ScreenError::Rejected)?;
+        let settle = match target {
+            Target::Url(url) => {
+                self.show_in_browser(Some(&url)).await?;
+                PAGE_SETTLE
+            }
+            Target::BrowserFile(path) => {
+                check_file(&path).await?;
+                self.show_in_browser(Some(&browser::file_url(&path)))
+                    .await?;
+                PAGE_SETTLE
+            }
+            Target::DefaultApp(path) => {
+                check_file(&path).await?;
+                let argv = vec![OPEN_COMMAND.to_owned(), path.display().to_string()];
+                self.start_app("opening the file", argv, cwd).await?;
+                APP_SETTLE
+            }
+        };
+        tokio::time::sleep(settle).await;
+        Ok(self.observe().await?)
+    }
+
+    /// Starts or raises an application, then returns a screenshot.
+    pub async fn launch_app(
+        &mut self,
+        application: &str,
+        uri: Option<&str>,
+        cwd: &Path,
+    ) -> Result<Observation, ScreenError> {
+        self.focus_or_launch(application, uri, cwd).await?;
+        let settle = if uri.is_some() {
+            PAGE_SETTLE
+        } else {
+            APP_SETTLE
+        };
+        tokio::time::sleep(settle).await;
+        Ok(self.observe().await?)
+    }
+
+    /// Raises the window an application name matches. Starts the application when no window
+    /// matches, or when there is something to open in it.
+    async fn focus_or_launch(
+        &mut self,
+        application: &str,
+        uri: Option<&str>,
+        cwd: &Path,
+    ) -> Result<(), ScreenError> {
+        let home = workdir::home_dir();
+        let name = application.to_owned();
+        let wanted_uri = uri.map(str::to_owned);
+        let app =
+            tokio::task::spawn_blocking(move || find_app(&name, wanted_uri.as_deref(), &home))
+                .await
+                .context("looking for the application")?;
+        let windows = self.windows().await?;
+        let in_window = |class: &str| plan::pick_window(&windows, class).map(|window| window.id);
+        match app {
+            Some(App::Browser) => self.show_in_browser(uri).await,
+            Some(App::Terminal) => {
+                let existing = in_window(TERMINAL_CLASS);
+                self.raise_or_start(existing, "Terminal", apps::terminal_argv(), cwd)
+                    .await
+            }
+            Some(App::Command { label, argv }) => {
+                let program = argv[0].rsplit('/').next().unwrap_or_default();
+                let existing = if uri.is_some() {
+                    None
+                } else {
+                    in_window(application).or_else(|| in_window(program))
+                };
+                self.raise_or_start(existing, &label, argv, cwd).await
+            }
+            None => match in_window(application) {
+                Some(window) => Ok(self.raise(window).await?),
+                None => Err(no_window(
+                    application,
+                    &windows.iter().map(WindowInfo::describe).collect::<Vec<_>>(),
+                )),
+            },
+        }
+    }
+
+    async fn raise_or_start(
+        &mut self,
+        existing: Option<u32>,
+        label: &str,
+        argv: Vec<String>,
+        cwd: &Path,
+    ) -> Result<(), ScreenError> {
+        match existing {
+            Some(window) => Ok(self.raise(window).await?),
+            None => self.start_app(label, argv, cwd).await,
+        }
+    }
+
+    /// Opens `url` in the screen's browser, or just raises it without one. Starts the browser
+    /// first when it is not running.
+    pub async fn show_in_browser(&mut self, url: Option<&str>) -> Result<(), ScreenError> {
+        let number = self.number;
+        if let Some(browser) = self.browser.as_mut()
+            && browser.is_running()
+        {
+            if let Some(url) = url {
+                browser
+                    .open_url(url, number)
+                    .await
+                    .map_err(ScreenError::Failed)?;
+            }
+            let windows = self.windows().await?;
+            if let Some(window) = plan::pick_window(&windows, BROWSER_CLASS) {
+                self.raise(window.id).await?;
+            }
+            return Ok(());
+        }
+        if let Some(gone) = self.browser.take() {
+            gone.close().await;
+        }
+        let before = self.window_ids().await?;
+        let browser = Browser::start(number, self.size, url)
+            .await
+            .map_err(ScreenError::Failed)?;
+        self.browser = Some(browser);
+        self.wait_for_window(&before, None).await?;
+        Ok(())
+    }
+
+    async fn window_ids(&self) -> Result<BTreeSet<u32>> {
+        Ok(self
+            .windows()
+            .await?
+            .iter()
+            .map(|window| window.id)
+            .collect())
+    }
+
+    /// Waits until a window that is not in `before` exists, up to [`WINDOW_TIMEOUT`].
+    /// Returns the exit status of `child` when it fails before a window shows up.
+    async fn wait_for_window(
+        &self,
+        before: &BTreeSet<u32>,
+        mut child: Option<&mut Child>,
+    ) -> Result<Option<std::process::ExitStatus>, ScreenError> {
+        let deadline = tokio::time::Instant::now() + WINDOW_TIMEOUT;
+        loop {
+            if let Some(child) = child.as_deref_mut()
+                && let Some(status) = child.try_wait().context("checking the new process")?
+                && !status.success()
+            {
+                return Ok(Some(status));
+            }
+            let shown = self
+                .windows()
+                .await?
+                .iter()
+                .any(|window| !before.contains(&window.id));
+            if shown || tokio::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            tokio::time::sleep(WINDOW_POLL).await;
+        }
+    }
+
+    /// Starts a program on this screen and waits briefly for its window.
+    async fn start_app(
+        &mut self,
+        label: &str,
+        argv: Vec<String>,
+        cwd: &Path,
+    ) -> Result<(), ScreenError> {
+        self.apps
+            .retain_mut(|app| matches!(app.try_wait(), Ok(None)));
+        let before = self.window_ids().await?;
+        let dir = if cwd.is_dir() {
+            cwd.to_path_buf()
+        } else {
+            workdir::home_dir()
+        };
+        let mut child = Command::new(&argv[0])
+            .args(&argv[1..])
+            .env_clear()
+            .envs(env::from_process(Some(self.number)))
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|error| {
+                ScreenError::Rejected(format!("cannot start {label} ({}): {error}", argv[0]))
+            })?;
+        if let Some(status) = self.wait_for_window(&before, Some(&mut child)).await? {
+            let hint = if argv[0] == OPEN_COMMAND {
+                ". No installed application opens this kind of file"
+            } else {
+                ""
+            };
+            return Err(ScreenError::Rejected(format!(
+                "{label} ({}) exited with {status} before opening a window{hint}",
+                argv[0]
+            )));
+        }
+        self.apps.push(child);
+        Ok(())
+    }
+}
+
+async fn check_file(path: &Path) -> Result<(), ScreenError> {
+    match tokio::fs::metadata(path).await {
+        Ok(_) => Ok(()),
+        Err(error) => Err(ScreenError::Rejected(format!(
+            "cannot open {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+/// Resolves an application name using the installed `.desktop` files and the daemon's `PATH`.
+fn find_app(name: &str, uri: Option<&str>, home: &Path) -> Option<App> {
+    let mut entries = Vec::new();
+    for dir in apps::desktop_dirs(home) {
+        let Ok(files) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            let Some(id) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".desktop"))
+            else {
+                continue;
+            };
+            if let Ok(text) = std::fs::read_to_string(&path)
+                && let Some(entry) = apps::parse_desktop(id, &text)
+            {
+                entries.push(entry);
+            }
+        }
+    }
+    let path_var = std::env::var_os("PATH");
+    apps::resolve(name, &entries, uri, |program| {
+        apps::executable_exists(program, path_var.as_deref())
+    })
 }
 
 fn no_window(application: &str, open: &[String]) -> ScreenError {
@@ -464,7 +757,7 @@ fn no_window(application: &str, open: &[String]) -> ScreenError {
         format!("Open windows: {}.", open.join(", "))
     };
     ScreenError::Rejected(format!(
-        "no open window matches {application:?}. {listing} Launching applications is not available yet, so focus only raises windows that are already open."
+        "no open window matches {application:?} and no installed application has that name. {listing}"
     ))
 }
 
