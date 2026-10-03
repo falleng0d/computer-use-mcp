@@ -1,0 +1,20 @@
+[package]
+name = "computerd"
+description = "Daemon inside the computer container that captures the screen and drives input."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8.9"
+computer-protocol = { version = "0.1.0", path = "../computer-protocol" }
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "net", "signal"] }

@@ -1,0 +1,75 @@
+name: Build host binaries
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build
+        type: string
+        default: ""
+      release-version:
+        description: Version embedded in the binary. Empty for dev builds.
+        type: string
+        default: ""
+      retention-days:
+        type: number
+        default: 14
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      COMPUTER_USE_MCP_VERSION: ${{ inputs.release-version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install && rustup target add ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked -p computer-use-mcp --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          name="computer-use-mcp-${{ matrix.target }}"
+          bin_dir="target/${{ matrix.target }}/release"
+          mkdir -p dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "dist/$name.zip" "./$bin_dir/computer-use-mcp.exe" ./README.md ./LICENSE
+          else
+            cp README.md LICENSE "$bin_dir/"
+            tar -czf "dist/$name.tar.gz" -C "$bin_dir" computer-use-mcp README.md LICENSE
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: computer-use-mcp-${{ matrix.target }}
+          path: dist/*
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: error

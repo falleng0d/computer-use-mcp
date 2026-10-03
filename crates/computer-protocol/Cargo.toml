@@ -1,0 +1,17 @@
+[package]
+name = "computer-protocol"
+description = "Types shared by the host MCP server and the in-container daemon."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }

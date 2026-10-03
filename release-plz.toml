@@ -1,0 +1,44 @@
+[workspace]
+git_only = true
+git_tag_name = "v{{ version }}"
+git_tag_enable = false
+git_release_enable = false
+git_release_type = "auto"
+changelog_update = false
+release_always = false
+semver_check = false
+pr_labels = ["release"]
+repo_url = "https://github.com/falleng0d/computer-use-mcp"
+
+[[package]]
+name = "computer-use-mcp"
+git_tag_enable = true
+git_release_enable = true
+git_release_name = "v{{ version }}"
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+changelog_include = ["computerd", "computer-protocol"]
+
+[changelog]
+body = """
+## [{{ version }}]{%- if release_link -%}({{ release_link }}){% endif %} - {{ timestamp | date(format=\"%Y-%m-%d\") }}
+{% for group, commits in commits | group_by(attribute=\"group\") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}*({{ commit.scope }})* {% endif %}{% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message }}
+{% endfor %}
+{% endfor %}
+"""
+commit_parsers = [
+  { message = "^chore: release", skip = true },
+  { message = "^feat", group = "added" },
+  { message = "^fix", group = "fixed" },
+  { message = "^refactor", group = "changed" },
+  { message = "^perf", group = "changed" },
+  { message = "^docs", group = "documentation" },
+  { message = "^build", group = "build" },
+  { message = "^ci", group = "build" },
+  { message = "^chore", group = "maintenance" },
+  { message = "^test", group = "tests" },
+  { message = "^.*", group = "other" },
+]
