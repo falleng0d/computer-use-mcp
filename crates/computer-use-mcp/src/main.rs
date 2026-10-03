@@ -1,6 +1,9 @@
+mod client;
+mod computer;
 mod image;
+mod server;
 
-use anyhow::bail;
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -16,7 +19,8 @@ enum Command {
     Info,
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Some(Command::Info) => {
             let image = image::from_env();
@@ -26,6 +30,22 @@ fn main() -> anyhow::Result<()> {
             println!("pull if missing: {}", image.pull);
             Ok(())
         }
-        None => bail!("the MCP server is not implemented yet"),
+        None => serve().await,
     }
+}
+
+async fn serve() -> anyhow::Result<()> {
+    use rmcp::{ServiceExt, transport::stdio};
+
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
+    tracing::info!(version = computer_protocol::VERSION, "MCP server starting");
+    let running = server::Server::from_env()
+        .serve(stdio())
+        .await
+        .context("starting the MCP server")?;
+    running.waiting().await.context("running the MCP server")?;
+    Ok(())
 }

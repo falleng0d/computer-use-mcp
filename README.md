@@ -2,7 +2,7 @@
 
 An MCP server that gives AI agents a computer. Any MCP client, such as Claude Code or OpenCode, can see and control one shared Linux desktop that runs in Docker. You can watch and use the same desktop through VNC.
 
-> **Status:** project setup only. The release pipeline, the container image, and a health endpoint work. The MCP tools and the desktop stack are not built yet.
+> **Status:** early. The MCP server starts the computer and hands out sessions (`start_computer`, `end_session`). The desktop stack and the other tools are not built yet.
 
 ## Design
 
@@ -27,15 +27,18 @@ The project has three Rust crates:
 3. On macOS, the binary is not signed. If you downloaded it with a browser, remove the quarantine flag with `xattr -d com.apple.quarantine computer-use-mcp`.
 4. The image lives in a private GitHub registry. Log in once with a token that has the `read:packages` scope, using `docker login ghcr.io -u <github-user>`.
 
-Check the install with `computer-use-mcp info`. It prints the version and the image the binary uses.
+Add it to your agent host as an MCP server that runs `computer-use-mcp` with no arguments. Check the install with `computer-use-mcp info`. It prints the version and the image the binary uses.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `COMPUTER_USE_NAME` | `computer-use` | Name of the container. The home volume is `<name>-home`. Applies at creation. |
 | `COMPUTER_USE_IMAGE` | Release builds use `ghcr.io/falleng0d/computer-use-mcp:<version>`. Dev builds use `computer-use-mcp:dev`. | Image used for the computer container. |
 
 Release builds pull their image when it is missing. Dev builds never pull, so a dev host binary is never paired with an old image by accident. Build the dev image with `just image`.
+
+The server makes no Docker calls until an agent calls `start_computer`. That tool takes a title (1 to 80 characters) and returns a session id. The computer gets the host timezone and the `en_US.UTF-8` locale when it is created.
 
 ## Development
 

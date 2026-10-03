@@ -9,6 +9,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/computerd /usr/local/bin/computerd
 
 FROM debian:trixie-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends locales tzdata \
+    && sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen \
+    && locale-gen \
+    && rm -rf /var/lib/apt/lists/*
+ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 RUN useradd --create-home --uid 1000 computer
 COPY --from=build /usr/local/bin/computerd /usr/local/bin/computerd
 USER computer

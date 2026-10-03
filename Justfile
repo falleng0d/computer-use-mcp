@@ -55,9 +55,9 @@ image:
 
 image-check: image
   docker rm -f computer-use-mcp-check >/dev/null 2>&1 || true
-  docker run -d --rm --name computer-use-mcp-check -p 127.0.0.1:17070:7070 {{dev_image}} >/dev/null
+  docker run -d --rm --name computer-use-mcp-check -e COMPUTERD_TOKEN=check -p 127.0.0.1:17070:7070 {{dev_image}} >/dev/null
   sleep 2
-  curl -fsS http://127.0.0.1:17070/health; echo
+  curl -fsS -H 'Authorization: Bearer check' http://127.0.0.1:17070/health; echo
   docker rm -f computer-use-mcp-check >/dev/null
 
 version:

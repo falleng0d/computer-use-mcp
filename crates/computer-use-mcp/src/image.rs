@@ -2,7 +2,7 @@ pub const REGISTRY_IMAGE: &str = "ghcr.io/falleng0d/computer-use-mcp";
 pub const DEV_IMAGE: &str = "computer-use-mcp:dev";
 pub const IMAGE_ENV: &str = "COMPUTER_USE_IMAGE";
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
     pub reference: String,
     pub pull: bool,

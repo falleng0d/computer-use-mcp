@@ -1,24 +1,30 @@
-use axum::{Json, Router, routing::get};
-use computer_protocol::{Health, PROTOCOL_VERSION, VERSION};
+mod api;
 
-const LISTEN_ADDR: &str = "0.0.0.0:7070";
+use std::net::SocketAddr;
+
+use anyhow::Context;
+use computer_protocol::{API_PORT, TOKEN_ENV, VERSION};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let app = Router::new().route("/health", get(health));
-    let listener = tokio::net::TcpListener::bind(LISTEN_ADDR).await?;
-    println!("computerd {VERSION} listening on {LISTEN_ADDR}");
-    axum::serve(listener, app)
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
+    let token = std::env::var(TOKEN_ENV)
+        .ok()
+        .filter(|token| !token.is_empty())
+        .with_context(|| format!("{TOKEN_ENV} must be set"))?;
+    let addr = SocketAddr::from(([0, 0, 0, 0], API_PORT));
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("listening on {addr}"))?;
+    info!(version = VERSION, %addr, "computerd started");
+    axum::serve(listener, api::router(token))
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await
+        .context("serving the API")?;
     Ok(())
-}
-
-async fn health() -> Json<Health> {
-    Json(Health {
-        protocol_version: PROTOCOL_VERSION,
-        version: VERSION.to_owned(),
-    })
 }
 
 #[cfg(unix)]
