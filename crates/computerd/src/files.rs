@@ -24,11 +24,12 @@ use crate::{
 
 const MAX_LIST_ENTRIES: usize = 1000;
 const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_LINK_HOPS: usize = 40;
 const SNIFF_BYTES: usize = 8192;
 const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 const JPEG_MAGIC: &[u8] = b"\xFF\xD8\xFF";
 const SHELL_HINT: &str =
-    "Inspect it with the shell tool, for example `file`, `xxd | head`, or `strings`.";
+    "Inspect it with the shell tool, for example `file <path>` or `od -c <path> | head`.";
 
 /// What the bytes of a file say it is.
 #[derive(Debug, PartialEq, Eq)]
@@ -144,6 +145,12 @@ pub fn read(cwd: &Path, home: &Path, request: &ReadFileRequest) -> Result<ReadFi
             real.display()
         ));
     }
+    if !meta.is_file() {
+        return Err(format!(
+            "{} is not a regular file (a pipe, device, or socket), read_file cannot open it",
+            real.display()
+        ));
+    }
     let mut bytes = Vec::new();
     fs::File::open(&real)
         .and_then(|file| file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes))
@@ -165,7 +172,7 @@ fn interpret(path: &str, bytes: &[u8], request: &ReadFileRequest) -> Result<Read
             data_base64: STANDARD.encode(bytes),
         }),
         Content::Image(_) => Err(format!(
-            "{path} is an image of {} bytes, over the {MAX_IMAGE_BYTES} byte limit for reading images. Make a smaller copy with a shell command, for example `convert in.png -resize 50% out.png` when ImageMagick is installed, and read that.",
+            "{path} is an image of {} bytes, over the {MAX_IMAGE_BYTES} byte limit for reading images. Make a smaller copy with a shell command, for example `convert in.png -resize 50% out.png`, and read that.",
             bytes.len()
         )),
         Content::Text(text) => {
@@ -268,9 +275,15 @@ pub fn write(
             if !meta.is_file() {
                 return Err(format!("{} is not a regular file", real.display()));
             }
+            if meta.permissions().readonly() {
+                return Err(format!(
+                    "permission denied for {}, the file is read-only",
+                    real.display()
+                ));
+            }
             (real, Some(meta.permissions()))
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => (lexical(&wanted), None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (dangling_target(&wanted), None),
         Err(error) => return Err(io_message(&error, &wanted)),
     };
     let Some(parent) = target.parent().filter(|_| target.file_name().is_some()) else {
@@ -290,6 +303,19 @@ pub fn write(
         path: shown.display().to_string(),
         bytes: request.content.len() as u64,
     })
+}
+
+/// Where a write to `path` lands when nothing exists there: the end of a chain of dangling symlinks, or `path` itself.
+fn dangling_target(path: &Path) -> std::path::PathBuf {
+    let mut current = lexical(path);
+    for _ in 0..MAX_LINK_HOPS {
+        let Ok(link) = fs::read_link(&current) else {
+            break;
+        };
+        let base = current.parent().unwrap_or(Path::new("/"));
+        current = lexical(&base.join(link));
+    }
+    current
 }
 
 /// Removes `.` and `..` from a path that does not exist yet.
@@ -317,49 +343,22 @@ fn write_temp(temp: &Path, content: &[u8], permissions: Option<fs::Permissions>)
     if let Some(permissions) = permissions {
         file.set_permissions(permissions)?;
     }
-    Ok(())
+    file.sync_all()
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use super::*;
 
-    struct Dir(std::path::PathBuf);
-
-    impl Dir {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!("computerd-files-{}", Uuid::new_v4()));
-            fs::create_dir_all(&path).expect("temp dir is creatable");
-            Self(fs::canonicalize(path).expect("temp dir exists"))
-        }
-    }
-
-    impl Drop for Dir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn read_request(path: &str, offset: Option<u64>, limit: Option<u64>) -> ReadFileRequest {
+    pub(super) fn read_request(
+        path: &str,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> ReadFileRequest {
         ReadFileRequest {
             path: path.to_owned(),
             offset,
             limit,
-        }
-    }
-
-    fn write_request(path: &str, content: &str) -> WriteFileRequest {
-        WriteFileRequest {
-            path: path.to_owned(),
-            content: content.to_owned(),
-        }
-    }
-
-    fn list_request(path: Option<&str>) -> ListFilesRequest {
-        ListFilesRequest {
-            path: path.map(str::to_owned),
         }
     }
 
@@ -425,6 +424,42 @@ mod tests {
         assert!(error.contains("smaller copy"), "{error}");
         let binary = interpret("/x", b"\0\x01", &request).unwrap_err();
         assert!(binary.contains("shell tool"), "{binary}");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod fs_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::{tests::read_request, *};
+
+    struct Dir(std::path::PathBuf);
+
+    impl Dir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("computerd-files-{}", Uuid::new_v4()));
+            fs::create_dir_all(&path).expect("temp dir is creatable");
+            Self(fs::canonicalize(path).expect("temp dir exists"))
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_request(path: &str, content: &str) -> WriteFileRequest {
+        WriteFileRequest {
+            path: path.to_owned(),
+            content: content.to_owned(),
+        }
+    }
+
+    fn list_request(path: Option<&str>) -> ListFilesRequest {
+        ListFilesRequest {
+            path: path.map(str::to_owned),
+        }
     }
 
     #[test]
@@ -532,5 +567,44 @@ mod tests {
         assert!(error.ends_with("missing does not exist"), "{error}");
         let error = read(&dir.0, &dir.0, &read_request(".", None, None)).unwrap_err();
         assert!(error.contains("is a folder"), "{error}");
+    }
+
+    #[test]
+    fn pipes_are_refused_instead_of_blocking_the_read() {
+        let dir = Dir::new();
+        let fifo = dir.0.join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let error = read(&dir.0, &dir.0, &read_request("pipe", None, None)).unwrap_err();
+        assert!(error.contains("not a regular file"), "{error}");
+    }
+
+    #[test]
+    fn writing_through_a_dangling_symlink_creates_its_target_and_keeps_the_link() {
+        let dir = Dir::new();
+        std::os::unix::fs::symlink("sub/../real.txt", dir.0.join("link")).unwrap();
+        write(&dir.0, &dir.0, &write_request("link", "data")).unwrap();
+        assert_eq!(fs::read_to_string(dir.0.join("real.txt")).unwrap(), "data");
+        assert!(
+            fs::symlink_metadata(dir.0.join("link"))
+                .unwrap()
+                .is_symlink()
+        );
+        write(&dir.0, &dir.0, &write_request("link", "more")).unwrap();
+        assert_eq!(fs::read_to_string(dir.0.join("real.txt")).unwrap(), "more");
+    }
+
+    #[test]
+    fn read_only_files_are_refused_and_left_alone() {
+        let dir = Dir::new();
+        let file = dir.0.join("locked");
+        fs::write(&file, "keep").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+        let error = write(&dir.0, &dir.0, &write_request("locked", "new")).unwrap_err();
+        assert!(error.contains("permission denied"), "{error}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "keep");
     }
 }

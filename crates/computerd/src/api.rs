@@ -21,7 +21,7 @@ use crate::sessions::{SessionError, Sessions};
 
 const BEARER_PREFIX: &str = "Bearer ";
 /// Room for a 10 MB file whose every byte JSON escapes to 6 bytes.
-const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_WRITE_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 struct AppState {
@@ -44,8 +44,10 @@ pub fn router(token: String, sessions: Sessions) -> Router {
         .route("/sessions/{id}/cwd", post(set_cwd))
         .route("/sessions/{id}/files/list", post(list_files))
         .route("/sessions/{id}/files/read", post(read_file))
-        .route("/sessions/{id}/files/write", post(write_file))
-        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .route(
+            "/sessions/{id}/files/write",
+            post(write_file).layer(DefaultBodyLimit::max(MAX_WRITE_BODY_BYTES)),
+        )
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state)
 }

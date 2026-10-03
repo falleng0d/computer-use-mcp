@@ -428,7 +428,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Write a UTF-8 text file on the computer as the user `computer`, replacing the file if it exists. Missing folders are created. The write is atomic, so nobody reads half a file, and an existing file keeps its permissions. Relative paths start at your working folder, `~` is home. Content is limited to 10 MB. Returns the absolute path and the bytes written. All sessions see the same files."
+        description = "Write a UTF-8 text file on the computer as the user `computer`, replacing the file if it exists. Missing folders are created. The write is atomic, so nobody reads half a file, an existing file keeps its permissions, and a read-only file is refused with permission denied. Relative paths start at your working folder, `~` is home. Content is limited to 10 MB. Returns the absolute path and the bytes written. All sessions see the same files."
     )]
     async fn write_file(
         &self,
