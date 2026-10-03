@@ -1160,6 +1160,9 @@ mod tests {
         .unwrap()
     }
 
+    /// Longer than the 8 s Chromium gets to quit, since screens close in a background task.
+    const CLOSE_WAIT: Duration = Duration::from_secs(15);
+
     fn open_args(session: &SessionId, path: &str) -> OpenPathArgs {
         serde_json::from_value(serde_json::json!({
             "session": session.as_str(),
@@ -1216,11 +1219,15 @@ mod tests {
             assert!(error.to_string().contains(refused), "{error:#}");
         }
 
+        let ended = std::time::Instant::now();
         server.end(page.as_str()).await.unwrap();
-        let after = shell(&format!(
-            "pgrep -c chromium; ls -A {profile} | grep -c '^Singleton'; true"
-        ))
-        .await;
+        let check = format!("pgrep -c chromium; ls -A {profile} | grep -c '^Singleton'; true");
+        let mut after = shell(&check).await;
+        while !after.contains("--- stdout ---\n0\n0\n") && ended.elapsed() < CLOSE_WAIT {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            after = shell(&check).await;
+        }
+        eprintln!("screen closed {} ms after end", ended.elapsed().as_millis());
         assert!(after.contains("--- stdout ---\n0\n0\n"), "{after}");
     }
 
