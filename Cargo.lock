@@ -371,6 +371,7 @@ dependencies = [
 name = "computer-protocol"
 version = "0.1.0"
 dependencies = [
+ "des",
  "schemars",
  "serde",
  "serde_json",
@@ -408,7 +409,6 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "computer-protocol",
- "des",
  "futures-util",
  "libc",
  "png",

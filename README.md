@@ -41,6 +41,8 @@ Add it to your agent host as an MCP server that runs `computer-use-mcp` with no 
 | `COMPUTER_USE_SHELL_TIMEOUT_MAX` | `600` | Longest timeout an agent may ask for, in seconds. If the default is unset and this is lower than 120, the default follows it. Read when `start_computer` runs. |
 | `COMPUTER_USE_IDLE_TIMEOUT` | `1h` | Time without agent calls after which a session ends. Seconds (`90`) or a number with `s`, `m`, or `h` (`30m`, `2h`). Read when `start_computer` runs. |
 | `COMPUTER_USE_PORT_BASE` | `20900` | First of the 17 host ports the computer publishes on `127.0.0.1` (a port from 1024 to 65519). Applies at creation. |
+| `COMPUTER_USE_OPEN` | `browser` | What opens when one of this server's sessions gets its screen: `browser`, `vnc`, or `none`. Read when `start_computer` runs. See "Opening the viewer". |
+| `COMPUTER_USE_VNC_VIEWER` | unset | Windows only. Path of the VNC viewer that `vnc` mode runs. See "Opening the viewer". |
 | `COMPUTER_USE_IMAGE` | Release builds use `ghcr.io/falleng0d/computer-use-mcp:<version>`. Dev builds use `computer-use-mcp:dev`. | Image used for the computer container. |
 
 Release builds pull their image when it is missing. Dev builds never pull, so a dev host binary is never paired with an old image by accident. Build the dev image with `just image`.
@@ -75,6 +77,17 @@ Ports published on `127.0.0.1` only:
 Every viewer goes through `computerd`, which checks the key, refuses page requests whose `Host` is not `127.0.0.1` or `localhost` on that port, and checks `Origin` on WebSocket upgrades. While a viewer is attached to a screen, the session's idle timer does not run. When a session ends while someone watches, it ends for the agent at once, but its screen stays open until the last viewer disconnects.
 
 The base port is a setting of the computer, read when the computer is created. Two computers on the same machine need different bases, for example `COMPUTER_USE_NAME=other COMPUTER_USE_PORT_BASE=21900`. If a port is taken, `start_computer` says which one and names the setting. A computer that already exists keeps its ports. Remove it with `docker rm` (home stays) to create it again with another base.
+
+## Opening the viewer
+
+The viewer opens by itself the first time a session's screen opens, so the user sees the agent work without any step. `COMPUTER_USE_OPEN` picks how, per MCP server process.
+
+- `browser` (default). If a viewer page is already open in a browser, it switches to the new screen and highlights it in the sidebar, and no tab opens. Otherwise a tab opens on the new screen. Several screens opening at once open one tab. The page count is a best guess. If no page is really there, the viewer link from `start_computer` still works.
+- `vnc` on macOS runs `open vnc://:<key>@127.0.0.1:<port>`, which opens Screen Sharing.
+- `vnc` on Windows runs a VNC viewer directly, because Windows viewers do not read a password from a `vnc://` link. It needs [TigerVNC](https://tigervnc.org). The server uses `COMPUTER_USE_VNC_VIEWER` (the path of `vncviewer.exe`, run as `vncviewer.exe -passwd <file> 127.0.0.1::<port>`), or else `vncviewer.exe` from `PATH` or from `Program Files\TigerVNC`. The password goes into a private temp file that is removed after 15 s or when the server exits. With no viewer found, the server opens the browser and logs the reason to stderr.
+- `none` opens nothing.
+
+Opening never delays or fails a tool call. Problems go to stderr. `vnc` on Linux hosts opens the browser.
 
 ## Development
 

@@ -2,6 +2,7 @@ import RFB from '/novnc/core/rfb.js';
 
 const KEY_STORE = 'computerKey';
 const RETRY_MS = 2000;
+const FLASH_MS = 3000;
 
 const el = (id) => document.getElementById(id);
 const statusEl = el('status');
@@ -18,6 +19,8 @@ let rfb = null;
 let connected = false;
 let keyRejected = false;
 let initial = true;
+let flashed = null;
+let flashTimer = null;
 
 function readFragment() {
   const params = new URLSearchParams(location.hash.slice(1));
@@ -77,12 +80,24 @@ function render() {
     if (s.screen) button.addEventListener('click', () => select(s.screen));
     else button.disabled = true;
     item.append(button);
-    if (s.screen && s.screen === selected) item.className = 'selected';
+    const classes = [];
+    if (s.screen && s.screen === selected) classes.push('selected');
+    if (s.screen && s.screen === flashed) classes.push('flash');
+    item.className = classes.join(' ');
     listEl.append(item);
   }
   if (sessions.length === 0) setStatus('No sessions yet.');
   else setStatus('');
   bannerEl.hidden = !(connected && selected && !sessionOn(selected));
+}
+
+function flash(screen) {
+  flashed = screen;
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => {
+    flashed = null;
+    render();
+  }, FLASH_MS);
 }
 
 function disconnect() {
@@ -154,7 +169,10 @@ function handle(name, data) {
     }
     render();
   } else if (name === 'show') {
-    select(Number(data));
+    const screen = Number(data);
+    flash(screen);
+    select(screen);
+    render();
   }
 }
 

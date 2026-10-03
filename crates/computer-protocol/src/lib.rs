@@ -1,5 +1,9 @@
 use std::num::NonZeroU32;
 
+use des::{
+    Des,
+    cipher::{BlockCipherEncrypt, KeyInit},
+};
 use serde::{Deserialize, Serialize};
 
 pub mod act;
@@ -20,7 +24,7 @@ pub use shell::{
 };
 
 /// Version of the wire format between the host and `computerd`.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 pub const RELEASE_VERSION: Option<&str> = match option_env!("COMPUTER_USE_MCP_VERSION") {
     Some(version) if !version.is_empty() => Some(version),
@@ -62,6 +66,30 @@ pub fn vnc_port(screen: u8) -> u16 {
 #[must_use]
 pub fn viewer_link(host_port: u16, key: &str) -> String {
     format!("http://127.0.0.1:{host_port}/#key={key}")
+}
+
+/// Link that opens the viewer page focused on `screen`.
+#[must_use]
+pub fn viewer_screen_link(host_port: u16, key: &str, screen: u8) -> String {
+    format!("http://127.0.0.1:{host_port}/#key={key}&screen={screen}")
+}
+
+/// Fixed key VNC uses to obfuscate the password in a password file.
+const VNC_FILE_KEY: [u8; 8] = [23, 82, 107, 6, 35, 78, 88, 7];
+
+/// Contents of a VNC password file for `key`, as `Xvnc` and `vncviewer -passwd` read it.
+///
+/// The key is cut or padded to 8 bytes and DES-encrypted with a fixed key. VNC bit-reverses every byte of a DES key.
+#[must_use]
+pub fn vnc_password_file(key: &str) -> [u8; 8] {
+    let mut block = [0u8; 8];
+    for (slot, byte) in block.iter_mut().zip(key.bytes()) {
+        *slot = byte;
+    }
+    let cipher = Des::new(&VNC_FILE_KEY.map(u8::reverse_bits).into());
+    let mut out = block.into();
+    cipher.encrypt_block(&mut out);
+    out.into()
 }
 
 /// Longest accepted session title, in characters.
@@ -381,6 +409,9 @@ pub struct Observation {
     pub active_window: String,
     /// Base64 PNG of the screen. `None` when the frame is the one the session saw last.
     pub png_base64: Option<String>,
+    /// Screen number this call opened for the session, set on a reply to `observe` and never inside an [`ActReply`].
+    #[serde(default)]
+    pub opened_screen: Option<u8>,
 }
 
 /// Body of every error reply from `computerd`.
@@ -392,6 +423,15 @@ pub struct ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_password_file_is_the_des_obfuscation_xvnc_reads() {
+        assert_eq!(
+            vnc_password_file("abcd2345"),
+            [255, 232, 190, 74, 23, 18, 52, 125],
+            "bytes from the same encoding that Xvnc accepted in the Docker test"
+        );
+    }
 
     #[test]
     fn title_limits_count_characters_after_trimming() {

@@ -145,6 +145,21 @@ impl Client {
             .context("reading the viewer link")
     }
 
+    /// Asks every open viewer page to switch to `screen`. The reply counts the open pages.
+    pub async fn show_screen(&self, screen: u8) -> Result<ViewerInfo> {
+        self.http
+            .post(format!("{}/viewer/show/{screen}", self.base))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .context("asking the viewer pages to show the screen")?
+            .error_for_status()
+            .context("asking the viewer pages to show the screen")?
+            .json()
+            .await
+            .context("reading the viewer reply")
+    }
+
     /// Tells `computerd` the owner is alive, which keeps all its sessions.
     pub async fn heartbeat(&self, owner: &OwnerId) -> Result<()> {
         self.http

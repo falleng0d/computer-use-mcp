@@ -340,6 +340,7 @@ impl Screen {
             return Ok(ActReply {
                 actions_run: total,
                 observation: None,
+                opened_screen: None,
             });
         }
         tokio::time::sleep(Duration::from_millis(u64::from(request.settle_ms))).await;
@@ -354,6 +355,7 @@ impl Screen {
         Ok(ActReply {
             actions_run: total,
             observation: Some(observation),
+            opened_screen: None,
         })
     }
 
@@ -492,6 +494,7 @@ fn capture(source: &Mutex<Source>, size: ScreenSize) -> Result<Observation> {
         cursor,
         active_window,
         png_base64,
+        opened_screen: None,
     })
 }
 

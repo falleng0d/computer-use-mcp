@@ -14,6 +14,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+des = "0.9.0"
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"

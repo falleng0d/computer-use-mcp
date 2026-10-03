@@ -143,6 +143,9 @@ pub struct ActReply {
     pub actions_run: usize,
     /// The closing screenshot, when the batch asked for one.
     pub observation: Option<Observation>,
+    /// Screen number this batch opened for the session, when it was the session's first call.
+    #[serde(default)]
+    pub opened_screen: Option<u8>,
 }
 
 /// Kind of a [`RawAction`].

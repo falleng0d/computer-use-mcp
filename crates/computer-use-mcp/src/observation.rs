@@ -63,6 +63,7 @@ mod tests {
             cursor: Cursor { x: 10, y: 20 },
             active_window: "Terminal".to_owned(),
             png_base64: png_base64.map(str::to_owned),
+            opened_screen: None,
         }
     }
 
@@ -111,6 +112,7 @@ mod tests {
         let reply = |observation| ActReply {
             actions_run: 2,
             observation,
+            opened_screen: None,
         };
         let with_image = as_json(&act_result(reply(Some(observation(Some("QUJD"))))));
         let content = with_image["content"].as_array().unwrap();

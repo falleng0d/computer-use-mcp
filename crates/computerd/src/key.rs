@@ -6,18 +6,13 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use des::{
-    Des,
-    cipher::{BlockCipherEncrypt, KeyInit},
-};
+use computer_protocol::vnc_password_file;
 use tracing::warn;
 use uuid::Uuid;
 
 /// VNC password authentication only looks at the first 8 characters.
 const KEY_LEN: usize = 8;
 const ALPHABET: &[u8; 32] = b"abcdefghijkmnpqrstuvwxyz23456789";
-/// Fixed key `Xvnc` uses to obfuscate the password in its password file.
-const FILE_KEY: [u8; 8] = [23, 82, 107, 6, 35, 78, 88, 7];
 
 const CONFIG_DIR: &str = ".config/computerd";
 const KEY_FILE: &str = "viewer-key";
@@ -49,20 +44,6 @@ fn config_dir(home: &Path) -> PathBuf {
 /// Where `Xvnc` reads the obfuscated password.
 pub fn vnc_password_path(home: &Path) -> PathBuf {
     config_dir(home).join(VNC_FILE)
-}
-
-/// Contents of an `Xvnc` password file for `key`: the key padded to 8 bytes and DES-encrypted with the fixed key.
-///
-/// VNC bit-reverses every byte of a DES key.
-fn vnc_password_file(key: &str) -> [u8; 8] {
-    let mut block = [0u8; 8];
-    for (slot, byte) in block.iter_mut().zip(key.bytes()) {
-        *slot = byte;
-    }
-    let cipher = Des::new(&FILE_KEY.map(u8::reverse_bits).into());
-    let mut out = block.into();
-    cipher.encrypt_block(&mut out);
-    out.into()
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -117,15 +98,6 @@ mod tests {
         }
         assert_ne!(fresh(), fresh());
         assert_eq!(from_random([0, 1, 31, 32, 33, 255, 128, 7]), "ab9ab9ah");
-    }
-
-    #[test]
-    fn the_password_file_is_the_des_obfuscation_xvnc_reads() {
-        assert_eq!(
-            vnc_password_file("abcd2345"),
-            [255, 232, 190, 74, 23, 18, 52, 125],
-            "bytes from the same encoding that Xvnc accepted in the Docker test"
-        );
     }
 
     #[test]

@@ -415,10 +415,13 @@ impl Sessions {
     ///
     /// A screen that died or hung is closed and reopened by the next call.
     pub async fn observe(&self, id: &SessionId) -> Result<Observation, SessionError> {
-        self.with_screen(id, OBSERVE_TIMEOUT, async |screen| {
-            Ok(screen.observe().await?)
-        })
-        .await
+        let (mut observation, opened_screen) = self
+            .with_screen(id, OBSERVE_TIMEOUT, async |screen| {
+                Ok(screen.observe().await?)
+            })
+            .await?;
+        observation.opened_screen = opened_screen;
+        Ok(observation)
     }
 
     /// Runs a batch of actions on the session's screen, opening it first when needed.
@@ -426,11 +429,15 @@ impl Sessions {
     /// Batches of one session run one at a time, in the order they arrive.
     pub async fn act(&self, id: &SessionId, request: ActRequest) -> Result<ActReply, SessionError> {
         let budget = request.time_budget();
-        self.with_screen(id, budget, async |screen| screen.act(request).await)
-            .await
+        let (mut reply, opened_screen) = self
+            .with_screen(id, budget, async |screen| screen.act(request).await)
+            .await?;
+        reply.opened_screen = opened_screen;
+        Ok(reply)
     }
 
     /// Runs `call` on the session's screen while holding the session's screen lock.
+    /// Also returns the screen number when this call opened the screen.
     ///
     /// A screen that fails the call and is found dead, or that exceeds `timeout`, is closed.
     async fn with_screen<T>(
@@ -438,13 +445,14 @@ impl Sessions {
         id: &SessionId,
         timeout: Duration,
         call: impl AsyncFnOnce(&mut Screen) -> Result<T, ScreenError>,
-    ) -> Result<T, SessionError> {
+    ) -> Result<(T, Option<u8>), SessionError> {
         let active = self.begin(id)?;
         let session = &active.session;
         let mut slot = session.screen.lock().await;
         if matches!(*slot, Slot::Closed) || session.cancel.is_cancelled() {
             return Err(self.missing(id));
         }
+        let mut opened = None;
         if matches!(*slot, Slot::Unopened) {
             let lease = self.numbers.lease().ok_or(SessionError::NoFreeScreen)?;
             let screen = Screen::open(lease, session.screen_size)
@@ -460,6 +468,7 @@ impl Sessions {
             );
             self.hub.reopen_screen(screen.number());
             self.hub.notify();
+            opened = Some(screen.number());
             *slot = Slot::Open(Box::new(screen));
         }
         let Slot::Open(screen) = &mut *slot else {
@@ -470,7 +479,7 @@ impl Sessions {
             () = session.cancel.cancelled() => return Err(self.missing(id)),
         };
         let failure = match outcome {
-            Ok(Ok(value)) => return Ok(value),
+            Ok(Ok(value)) => return Ok((value, opened)),
             Ok(Err(ScreenError::Rejected(message))) => return Err(SessionError::Rejected(message)),
             Ok(Err(ScreenError::Failed(error))) => match screen.check_alive() {
                 Ok(()) => return Err(SessionError::Failed(error)),

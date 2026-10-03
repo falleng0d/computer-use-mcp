@@ -27,7 +27,9 @@ use crate::{
     computer::{Docked, Endpoint, Settings},
     file_result,
     image::{self, Image},
-    observation, shell_result,
+    observation,
+    open::{self, Opener},
+    shell_result,
 };
 
 const START_FIRST: &str = "call start_computer first";
@@ -290,6 +292,8 @@ pub struct Server {
     screen_size: Result<ScreenSize, String>,
     shell_timeouts: Result<ShellTimeouts, String>,
     idle: Result<NonZeroU32, String>,
+    open_mode: Result<open::Mode, String>,
+    opener: Arc<Opener>,
     heartbeats: Arc<Heartbeats>,
     image: Image,
     docked: Arc<OnceCell<Docked>>,
@@ -323,6 +327,7 @@ impl Server {
             screen_size_from_env(),
             shell_timeouts_from_env(),
             idle_from_env(),
+            open::mode_from_env(),
         )
     }
 
@@ -332,12 +337,16 @@ impl Server {
         screen_size: Result<ScreenSize, String>,
         shell_timeouts: Result<ShellTimeouts, String>,
         idle: Result<NonZeroU32, String>,
+        open_mode: Result<open::Mode, String>,
     ) -> Self {
+        let opener = Arc::new(Opener::new(open_mode.clone().unwrap_or_default()));
         Self {
             settings,
             screen_size,
             shell_timeouts,
             idle,
+            open_mode,
+            opener,
             heartbeats: Arc::new(Heartbeats::new()),
             image,
             docked: Arc::default(),
@@ -362,6 +371,9 @@ impl Server {
         let shell_timeouts = self.shell_timeouts()?;
         let idle_secs = self
             .idle
+            .clone()
+            .map_err(|message| anyhow::anyhow!(message))?;
+        self.open_mode
             .clone()
             .map_err(|message| anyhow::anyhow!(message))?;
         let docked = self.docked().await?;
@@ -395,11 +407,18 @@ impl Server {
 
     /// Ends every session this process started. Call before the process exits.
     pub async fn shutdown(&self) {
+        self.opener.shutdown().await;
         self.heartbeats.stop().await;
     }
 
     /// Client for the running computer, or the `START_FIRST` error.
     async fn client_for(&self, session: &str) -> anyhow::Result<(SessionId, Client)> {
+        let (session, endpoint) = self.endpoint_for(session).await?;
+        Ok((session, Client::new(&endpoint)?))
+    }
+
+    /// Endpoint of the running computer, or the `START_FIRST` error.
+    async fn endpoint_for(&self, session: &str) -> anyhow::Result<(SessionId, Endpoint)> {
         let session = SessionId::parse(session).map_err(|_| anyhow::anyhow!(START_FIRST))?;
         let endpoint = self
             .docked()
@@ -407,23 +426,36 @@ impl Server {
             .running_endpoint()
             .await?
             .ok_or_else(|| anyhow::anyhow!(START_FIRST))?;
-        Ok((session, Client::new(&endpoint)?))
+        Ok((session, endpoint))
     }
 
     async fn observe(&self, session: &str) -> anyhow::Result<CallToolResult> {
-        let (session, client) = self.client_for(session).await?;
-        match client.observe(&session).await {
+        let (session, endpoint) = self.endpoint_for(session).await?;
+        match Client::new(&endpoint)?.observe(&session).await {
             Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
-            other => other.map(observation::tool_result),
+            other => other.map(|observation| {
+                self.announce(&endpoint, observation.opened_screen);
+                observation::tool_result(observation)
+            }),
         }
     }
 
     async fn act(&self, args: ActArgs) -> anyhow::Result<CallToolResult> {
         let request = ActRequest::parse(&args.actions, args.observe, args.settle_ms)?;
-        let (session, client) = self.client_for(&args.session).await?;
-        match client.act(&session, &request).await {
+        let (session, endpoint) = self.endpoint_for(&args.session).await?;
+        match Client::new(&endpoint)?.act(&session, &request).await {
             Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
-            other => other.map(observation::act_result),
+            other => other.map(|reply| {
+                self.announce(&endpoint, reply.opened_screen);
+                observation::act_result(reply)
+            }),
+        }
+    }
+
+    /// Opens the viewer when the call opened a screen, without waiting for it.
+    fn announce(&self, endpoint: &Endpoint, opened_screen: Option<u8>) {
+        if let Some(screen) = opened_screen {
+            self.opener.screen_opened(endpoint.clone(), screen);
         }
     }
 
@@ -706,6 +738,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            Ok(open::Mode::None),
         );
 
         let first = server.start("first task").await.unwrap().session;
@@ -746,6 +779,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            Ok(open::Mode::None),
         );
 
         let session = server.start("leaving").await.unwrap().session;
@@ -784,6 +818,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            Ok(open::Mode::None),
         );
 
         let session = server.start("watcher").await.unwrap().session;
@@ -832,6 +867,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            Ok(open::Mode::None),
         );
         let two = Server::new(
             settings,
@@ -839,6 +875,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            Ok(open::Mode::None),
         );
 
         let (first, second) = tokio::join!(one.start("one"), two.start("two"));
@@ -885,6 +922,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            Ok(open::Mode::None),
         );
         let session = server.start("actor").await.unwrap().session;
 
@@ -983,6 +1021,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(timeouts),
             parse_idle(None),
+            Ok(open::Mode::None),
         );
         let session = server.start("shell user").await.unwrap().session;
         let run = |command: &'static str, timeout| {
@@ -1077,6 +1116,7 @@ none
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            Ok(open::Mode::None),
         );
         let writer = server.start("writer").await.unwrap().session;
         let reader = server.start("reader").await.unwrap().session;
@@ -1317,6 +1357,7 @@ X-Viewer-Key: {key}
             Ok(size),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            Ok(open::Mode::None),
         );
 
         let started = server.start("viewed").await.unwrap();

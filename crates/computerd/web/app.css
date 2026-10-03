@@ -11,6 +11,8 @@ body { display: flex; }
 #sessions li button:hover:not(:disabled) { background: #232730; }
 #sessions li button:disabled { cursor: default; opacity: .6; }
 #sessions li.selected button { background: #232730; border-left-color: var(--accent); }
+@keyframes flash { 0%, 60% { background: #2c4a73; } 100% { background: transparent; } }
+#sessions li.flash button { animation: flash 3s ease-out; }
 .title { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta { display: block; color: var(--muted); font-size: 12px; }
 #stage { position: relative; flex: 1; min-width: 0; }
