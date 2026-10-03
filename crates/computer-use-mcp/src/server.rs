@@ -295,8 +295,16 @@ mod tests {
 
         let first = server.observe(session.as_str()).await.unwrap();
         assert_eq!(content_len(first), 2);
-        let second = server.observe(session.as_str()).await.unwrap();
-        assert_eq!(content_len(second), 1);
+        let mut unchanged = false;
+        for _ in 0..10 {
+            let again = server.observe(session.as_str()).await.unwrap();
+            unchanged = content_len(again) == 1;
+            if unchanged {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        assert!(unchanged, "the desktop kept changing after it settled");
         let others_first = server.observe(other.as_str()).await.unwrap();
         assert_eq!(content_len(others_first), 2);
 

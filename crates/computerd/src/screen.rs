@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    future::Future,
     path::PathBuf,
     process::Stdio,
     sync::{Arc, Mutex},
@@ -26,6 +27,7 @@ const X_SOCKET_DIR: &str = "/tmp/.X11-unix";
 const X_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const WM_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Lowest screen number from [`FIRST_SCREEN`] to [`LAST_SCREEN`] that is not in `used`.
@@ -183,17 +185,14 @@ impl Screen {
         let number = lease.number;
         let mut processes = Processes::start_xvnc(number, size)?;
         match Self::bring_up(&mut processes, number, size).await {
-            Ok(capturer) => {
+            Ok(source) => {
                 info!(screen = number, %size, "screen opened");
                 Ok(Self {
                     _lease: lease,
                     number,
                     size,
                     processes,
-                    source: Arc::new(Mutex::new(Source {
-                        capturer,
-                        frames: FrameTracker::default(),
-                    })),
+                    source,
                 })
             }
             Err(error) => {
@@ -203,22 +202,46 @@ impl Screen {
         }
     }
 
-    async fn bring_up(processes: &mut Processes, number: u8, size: ScreenSize) -> Result<Capturer> {
+    async fn bring_up(
+        processes: &mut Processes,
+        number: u8,
+        size: ScreenSize,
+    ) -> Result<Arc<Mutex<Source>>> {
         let capturer = retry_until(X_READY_TIMEOUT, "Xvnc to accept connections", || {
             processes.check_alive()?;
-            Ok(Capturer::connect(&display(number), size).ok())
+            Ok(blocking(move || Capturer::connect(&display(number), size)))
         })
-        .await?;
+        .await?
+        .context("connecting to the display")?;
+        let source = Arc::new(Mutex::new(Source {
+            capturer,
+            frames: FrameTracker::default(),
+        }));
         processes.start_fluxbox()?;
         let ready = retry_until(WM_READY_TIMEOUT, "Fluxbox to start", || {
             processes.check_alive()?;
-            Ok(capturer.window_manager_ready()?.then_some(()))
+            let source = Arc::clone(&source);
+            Ok(blocking(move || {
+                let source = source
+                    .lock()
+                    .expect("the capture lock is only held inside spawn_blocking");
+                match source.capturer.window_manager_ready() {
+                    Ok(true) => Ok(()),
+                    Ok(false) => bail!("the window manager has not announced itself"),
+                    Err(error) => Err(error),
+                }
+            }))
         })
-        .await;
+        .await?;
         if let Err(error) = ready {
             warn!(screen = number, error = %format!("{error:#}"), "continuing without a ready window manager");
         }
-        Ok(capturer)
+        Ok(source)
+    }
+
+    /// Fails when `Xvnc` or Fluxbox has exited.
+    pub fn check_alive(&mut self) -> Result<()> {
+        self.processes.check_alive()
     }
 
     pub fn number(&self) -> u8 {
@@ -270,18 +293,43 @@ fn capture(source: &Mutex<Source>, size: ScreenSize) -> Result<Observation> {
     })
 }
 
-async fn retry_until<T>(
+/// Runs blocking X11 work on the blocking pool with a time limit, so a silent
+/// server cannot hold up an async worker.
+fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> impl Future<Output = Result<T>> {
+    let task = tokio::task::spawn_blocking(work);
+    async move {
+        match tokio::time::timeout(ATTEMPT_TIMEOUT, task).await {
+            Ok(joined) => joined.context("running blocking work")?,
+            Err(_) => bail!("no answer within {} s", ATTEMPT_TIMEOUT.as_secs()),
+        }
+    }
+}
+
+/// Repeats `attempt` until it succeeds or `limit` passes.
+///
+/// The outer error is fatal and ends the wait at once. The inner error reports
+/// a timeout and carries the last failed attempt's error.
+async fn retry_until<T, Fut>(
     limit: Duration,
     what: &str,
-    mut attempt: impl FnMut() -> Result<Option<T>>,
-) -> Result<T> {
+    mut attempt: impl FnMut() -> Result<Fut>,
+) -> Result<Result<T>>
+where
+    Fut: Future<Output = Result<T>>,
+{
     let deadline = tokio::time::Instant::now() + limit;
     loop {
-        if let Some(value) = attempt()? {
-            return Ok(value);
-        }
+        let last_error = match attempt()?.await {
+            Ok(value) => return Ok(Ok(value)),
+            Err(error) => error,
+        };
         if tokio::time::Instant::now() >= deadline {
-            bail!("timed out after {} s waiting for {what}", limit.as_secs());
+            return Ok(Err(last_error.context(format!(
+                "timed out after {} s waiting for {what}",
+                limit.as_secs()
+            ))));
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }

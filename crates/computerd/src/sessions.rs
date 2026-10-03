@@ -26,7 +26,23 @@ struct Session {
     title: SessionTitle,
     screen_size: ScreenSize,
     /// Holds the session's screen. Desktop actions lock it, so they run one at a time.
-    screen: Arc<tokio::sync::Mutex<Option<Screen>>>,
+    screen: Arc<tokio::sync::Mutex<Slot>>,
+}
+
+/// State of a session's screen. `Closed` is final, so a call racing with `end` cannot open a screen.
+enum Slot {
+    Unopened,
+    Open(Box<Screen>),
+    Closed,
+}
+
+impl Slot {
+    /// Marks the slot closed and stops the screen it held.
+    async fn close(&mut self) {
+        if let Self::Open(screen) = std::mem::replace(self, Self::Closed) {
+            (*screen).close().await;
+        }
+    }
 }
 
 /// Every session of the computer and the screens they own.
@@ -42,7 +58,7 @@ impl Sessions {
         let session = Session {
             title,
             screen_size,
-            screen: Arc::default(),
+            screen: Arc::new(tokio::sync::Mutex::new(Slot::Unopened)),
         };
         self.lock().insert(id, Arc::new(session));
     }
@@ -61,36 +77,52 @@ impl Sessions {
     pub async fn end(&self, id: &SessionId) -> Result<(), SessionError> {
         let session = self.lock().remove(id).ok_or(SessionError::Unknown)?;
         info!(session = %id, title = session.title.as_str(), "session ended");
-        let screen = session.screen.lock().await.take();
-        if let Some(screen) = screen {
-            screen.close().await;
-        }
+        session.screen.lock().await.close().await;
         Ok(())
     }
 
     /// Captures the session's screen, opening it first when this is the session's first call.
+    ///
+    /// A screen that died or hung is closed and reopened by the next call.
     pub async fn observe(&self, id: &SessionId) -> Result<Observation, SessionError> {
         let session = self.get(id)?;
-        let work = async {
-            let mut slot = session.screen.lock().await;
-            if slot.is_none() {
-                let lease = self.numbers.lease().ok_or(SessionError::NoFreeScreen)?;
-                let screen = Screen::open(lease, session.screen_size)
-                    .await
-                    .map_err(SessionError::Failed)?;
-                info!(session = %id, screen = screen.number(), "screen assigned");
-                *slot = Some(screen);
-            }
-            let screen = slot.as_mut().expect("the screen was opened above");
-            screen.observe().await.map_err(SessionError::Failed)
+        let mut slot = session.screen.lock().await;
+        if matches!(*slot, Slot::Closed) {
+            return Err(SessionError::Unknown);
+        }
+        if matches!(*slot, Slot::Unopened) {
+            let lease = self.numbers.lease().ok_or(SessionError::NoFreeScreen)?;
+            let screen = Screen::open(lease, session.screen_size)
+                .await
+                .map_err(SessionError::Failed)?;
+            info!(session = %id, screen = screen.number(), "screen assigned");
+            *slot = Slot::Open(Box::new(screen));
+        }
+        let Slot::Open(screen) = &mut *slot else {
+            unreachable!("the slot was opened above");
         };
-        match tokio::time::timeout(OBSERVE_TIMEOUT, work).await {
-            Ok(result) => result,
-            Err(_) => Err(SessionError::Failed(anyhow::anyhow!(
+        let failure = match tokio::time::timeout(OBSERVE_TIMEOUT, screen.observe()).await {
+            Ok(Ok(observation)) => return Ok(observation),
+            Ok(Err(error)) => match screen.check_alive() {
+                Ok(()) => return Err(SessionError::Failed(error)),
+                Err(dead) => dead,
+            },
+            Err(_) => anyhow::anyhow!(
                 "taking the screenshot timed out after {} s",
                 OBSERVE_TIMEOUT.as_secs()
-            ))),
-        }
+            ),
+        };
+        warn!(session = %id, error = %format!("{failure:#}"), "closing a broken screen");
+        *slot = match std::mem::replace(&mut *slot, Slot::Unopened) {
+            Slot::Open(screen) => {
+                (*screen).close().await;
+                Slot::Unopened
+            }
+            other => other,
+        };
+        Err(SessionError::Failed(failure.context(
+            "the screen stopped working and was closed, open windows are lost; call computer_observe again to get a fresh screen",
+        )))
     }
 
     /// Closes every screen. Called when `computerd` shuts down.
@@ -100,9 +132,7 @@ impl Sessions {
             if let Ok(mut slot) =
                 tokio::time::timeout(Duration::from_secs(10), session.screen.lock()).await
             {
-                if let Some(screen) = slot.take() {
-                    screen.close().await;
-                }
+                slot.close().await;
             } else {
                 warn!(
                     title = session.title.as_str(),

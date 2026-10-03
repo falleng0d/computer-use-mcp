@@ -64,7 +64,11 @@ impl Segment {
 
 impl Drop for Segment {
     fn drop(&mut self) {
-        // SAFETY: `ptr` came from shmat and is detached once, here.
-        unsafe { libc::shmdt(self.ptr.as_ptr().cast_const().cast()) };
+        // SAFETY: `ptr` came from shmat and is detached once, here. `id` is the segment's
+        // id, and removing it again after an earlier removal fails harmlessly.
+        unsafe {
+            libc::shmdt(self.ptr.as_ptr().cast_const().cast());
+            libc::shmctl(self.id, libc::IPC_RMID, std::ptr::null_mut());
+        }
     }
 }
