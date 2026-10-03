@@ -17,10 +17,9 @@ COPY crates/computerd/image/awscli.pub /tmp/awscli.pub
 RUN gpg --import /tmp/awscli.pub \
     && curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/aws.zip \
     && curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip.sig" -o /tmp/aws.zip.sig \
-    && gpg --verify /tmp/aws.zip.sig /tmp/aws.zip \
+    && gpg --status-fd 1 --verify /tmp/aws.zip.sig /tmp/aws.zip | grep -q 'VALIDSIG .* FB5DB77FD5C118B80511ADA8A6310ACC4672475C' \
     && unzip -q /tmp/aws.zip -d /tmp \
     && /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli
-
 FROM debian:trixie-slim
 ARG NODE_MAJOR=24
 # apt lists stay in the image so `sudo apt-get install` works without an update first.
@@ -54,7 +53,6 @@ COPY --chmod=0755 crates/computerd/image/check-tools.sh /usr/local/bin/check-too
 COPY --from=build /usr/local/bin/computerd /usr/local/bin/computerd
 COPY crates/computerd/image/fluxbox-init /etc/computerd/fluxbox-init
 ENV NPM_CONFIG_PREFIX=/home/computer/.local \
-    PIP_USER=1 \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
     PATH=/home/computer/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 USER computer

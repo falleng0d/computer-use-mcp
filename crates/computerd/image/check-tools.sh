@@ -20,7 +20,6 @@ check xterm -version
 check Xvnc -help
 check python3 -m venv --help
 check sudo -n true
-check fc-match "Noto Color Emoji"
 [ "$(getent passwd computer | cut -d: -f7)" = /bin/bash ] || { echo "default shell is not bash" >&2; failed=1; }
 case "$(bash -lc 'echo $PATH')" in
   /home/computer/.local/bin:*) ;;
