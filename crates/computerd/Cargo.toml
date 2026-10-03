@@ -23,7 +23,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["formatting"] }
 tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "process", "time", "fs", "io-util"] }
-tokio-util = "0.7.19"
+tokio-util = { version = "0.7.19", features = ["rt"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "ansi"] }
 uuid = { version = "1.27.0", features = ["v4"] }

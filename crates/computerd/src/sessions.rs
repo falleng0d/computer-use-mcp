@@ -13,8 +13,8 @@ use computer_protocol::{
     ReadFileReply, ReadFileRequest, ScreenSize, SessionId, SessionTitle, SetCwdReply,
     SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts, WriteFileReply, WriteFileRequest,
 };
-use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
+use tokio::{task::JoinHandle, time::Instant};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{info, warn};
 
 use crate::{
@@ -107,6 +107,18 @@ impl Session {
     }
 }
 
+/// Closes the screen of a session that has ended, waiting a bounded time for a call that still holds it.
+async fn close_screen(session: Arc<Session>) {
+    if let Ok(mut slot) = tokio::time::timeout(CLOSE_TIMEOUT, session.screen.lock()).await {
+        slot.close().await;
+    } else {
+        warn!(
+            title = session.title.as_str(),
+            "screen was busy, its processes are killed when the last call on it ends"
+        );
+    }
+}
+
 /// State of a session's screen. `Closed` is final, so a call racing with `end` cannot open a screen.
 enum Slot {
     Unopened,
@@ -131,6 +143,8 @@ pub struct Sessions {
     owners: Arc<Mutex<HashMap<OwnerId, Instant>>>,
     /// Sessions that ended without the agent asking, and why, oldest first.
     ended: Arc<Mutex<VecDeque<(SessionId, EndReason)>>>,
+    /// Screen closes of ended sessions, awaited at shutdown.
+    closing: TaskTracker,
     numbers: Numbers,
     home: PathBuf,
     shutdown: CancellationToken,
@@ -142,6 +156,7 @@ impl Default for Sessions {
             map: Arc::default(),
             owners: Arc::default(),
             ended: Arc::default(),
+            closing: TaskTracker::new(),
             numbers: Numbers::default(),
             home: workdir::home_dir(),
             shutdown: CancellationToken::new(),
@@ -200,7 +215,11 @@ impl Sessions {
 
     /// Looks up a session for an agent call. The call counts as activity until the guard drops.
     fn begin(&self, id: &SessionId) -> Result<Call, SessionError> {
-        self.get(id).map(Call::start)
+        let session = self.get(id)?;
+        if session.cancel.is_cancelled() {
+            return Err(self.missing(id));
+        }
+        Ok(Call::start(session))
     }
 
     /// Records a heartbeat for every session of `owner`.
@@ -215,11 +234,13 @@ impl Sessions {
     pub async fn end(&self, id: &SessionId) -> Result<(), SessionError> {
         let removed = self.lock().remove(id);
         let session = removed.ok_or_else(|| self.missing(id))?;
-        self.finish(id, &session, EndReason::Agent).await;
+        let _ = self.finish(id, session, EndReason::Agent).await;
         Ok(())
     }
 
     /// Ends every session of `owner` and returns how many there were.
+    ///
+    /// The sessions are ended even when the caller stops waiting for their screens to close.
     pub async fn end_owner(&self, owner: &OwnerId) -> usize {
         let ending: Vec<_> = {
             let mut map = self.lock();
@@ -232,14 +253,19 @@ impl Sessions {
                 .filter_map(|id| map.remove(&id).map(|session| (id, session)))
                 .collect()
         };
-        for (id, session) in &ending {
-            self.finish(id, session, EndReason::OwnerLeft).await;
+        let closing: Vec<_> = ending
+            .into_iter()
+            .map(|(id, session)| self.finish(&id, session, EndReason::OwnerLeft))
+            .collect();
+        let count = closing.len();
+        for closed in closing {
+            let _ = closed.await;
         }
-        ending.len()
+        count
     }
 
-    /// Ends the sessions that are due now.
-    async fn reap(&self) {
+    /// Ends the sessions that are due now. Screens close in the background.
+    fn reap(&self) {
         let now = Instant::now();
         let due: Vec<_> = {
             let mut map = self.lock();
@@ -255,8 +281,8 @@ impl Sessions {
                 .filter_map(|(id, why)| map.remove(&id).map(|session| (id, session, why)))
                 .collect()
         };
-        for (id, session, why) in &due {
-            self.finish(id, session, *why).await;
+        for (id, session, why) in due {
+            drop(self.finish(&id, session, why));
         }
         let live: HashSet<OwnerId> = self.lock().values().map(|s| s.owner.clone()).collect();
         lock(&self.owners).retain(|owner, _| live.contains(owner));
@@ -269,13 +295,17 @@ impl Sessions {
         loop {
             tokio::select! {
                 () = stop.cancelled() => return,
-                _ = tick.tick() => self.reap().await,
+                _ = tick.tick() => self.reap(),
             }
         }
     }
 
-    /// Finishes a session already removed from the map: remembers why, kills its commands, closes its screen.
-    async fn finish(&self, id: &SessionId, session: &Session, why: EndReason) {
+    /// Finishes a session already removed from the map.
+    ///
+    /// Remembers why and kills its commands and running screen call right away, then closes its
+    /// screen in a task `Sessions` owns. The returned handle completes when the screen is closed,
+    /// and dropping it does not stop the close.
+    fn finish(&self, id: &SessionId, session: Arc<Session>, why: EndReason) -> JoinHandle<()> {
         info!(
             session = %id,
             title = session.title.as_str(),
@@ -291,7 +321,7 @@ impl Sessions {
             ended.push_back((id.clone(), why));
         }
         session.cancel.cancel();
-        session.screen.lock().await.close().await;
+        self.closing.spawn(close_screen(session))
     }
 
     /// Captures the session's screen, opening it first when this is the session's first call.
@@ -325,7 +355,7 @@ impl Sessions {
         let active = self.begin(id)?;
         let session = &active.session;
         let mut slot = session.screen.lock().await;
-        if matches!(*slot, Slot::Closed) {
+        if matches!(*slot, Slot::Closed) || session.cancel.is_cancelled() {
             return Err(self.missing(id));
         }
         if matches!(*slot, Slot::Unopened) {
@@ -340,7 +370,11 @@ impl Sessions {
         let Slot::Open(screen) = &mut *slot else {
             unreachable!("the slot was opened above");
         };
-        let failure = match tokio::time::timeout(timeout, call(screen)).await {
+        let outcome = tokio::select! {
+            outcome = tokio::time::timeout(timeout, call(screen)) => outcome,
+            () = session.cancel.cancelled() => return Err(self.missing(id)),
+        };
+        let failure = match outcome {
             Ok(Ok(value)) => return Ok(value),
             Ok(Err(ScreenError::Rejected(message))) => return Err(SessionError::Rejected(message)),
             Ok(Err(ScreenError::Failed(error))) => match screen.check_alive() {
@@ -442,19 +476,15 @@ impl Sessions {
         self.shutdown.cancel();
     }
 
-    /// Closes every screen. Called when `computerd` shuts down.
+    /// Closes every screen and waits for the closes of sessions that ended earlier. Called when `computerd` shuts down.
     pub async fn close_all(&self) {
         let sessions: Vec<Arc<Session>> = self.lock().drain().map(|(_, session)| session).collect();
         for session in sessions {
-            if let Ok(mut slot) = tokio::time::timeout(CLOSE_TIMEOUT, session.screen.lock()).await {
-                slot.close().await;
-            } else {
-                warn!(
-                    title = session.title.as_str(),
-                    "screen was busy at shutdown"
-                );
-            }
+            session.cancel.cancel();
+            drop(self.closing.spawn(close_screen(session)));
         }
+        self.closing.close();
+        self.closing.wait().await;
     }
 }
 
@@ -581,6 +611,40 @@ mod tests {
         );
         stop.cancel();
         reaper.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_busy_screen_does_not_delay_other_sessions_from_ending_on_time() {
+        let sessions = Sessions::default();
+        let (silent, live) = (owner('a'), owner('b'));
+        let stuck = start(&sessions, '1', &silent, 3600);
+        let quiet = start(&sessions, '2', &live, 40);
+        let stop = CancellationToken::new();
+        let reaper = tokio::spawn({
+            let (sessions, stop) = (sessions.clone(), stop.clone());
+            async move { sessions.reap_until(stop).await }
+        });
+        let screen = sessions.get(&stuck).unwrap();
+        let busy = screen.screen.lock().await;
+
+        for _ in 0..3 {
+            pass(10).await;
+            sessions.heartbeat(&live);
+        }
+        pass(1).await;
+        assert_eq!(ended_by(&sessions, &stuck), Some(EndReason::OwnerGone));
+        assert!(screen.cancel.is_cancelled());
+        assert!(sessions.get(&quiet).is_ok());
+
+        pass(9).await;
+        assert_eq!(
+            ended_by(&sessions, &quiet),
+            Some(EndReason::Idle(Duration::from_secs(40)))
+        );
+        drop(busy);
+        stop.cancel();
+        reaper.await.unwrap();
+        sessions.close_all().await;
     }
 
     #[tokio::test]

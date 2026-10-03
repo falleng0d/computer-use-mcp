@@ -19,7 +19,7 @@ use tokio::{
     sync::{Mutex, OnceCell, watch},
     task::JoinHandle,
 };
-use tracing::{debug, error};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -136,13 +136,32 @@ async fn beat(owner: OwnerId, endpoint: watch::Receiver<Option<Endpoint>>) {
     let mut tick = tokio::time::interval(HEARTBEAT_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await;
+    let mut client: Option<(Endpoint, Client)> = None;
+    let mut failing = false;
     loop {
         tick.tick().await;
-        let endpoint = endpoint.borrow().clone();
-        let Some(endpoint) = endpoint else { continue };
-        let sent = async { Client::new(&endpoint)?.heartbeat(&owner).await }.await;
-        if let Err(error) = sent {
-            debug!(error = %format!("{error:#}"), "heartbeat failed");
+        let current = endpoint.borrow().clone();
+        let Some(current) = current else { continue };
+        if client.as_ref().is_none_or(|(known, _)| *known != current) {
+            match Client::new(&current) {
+                Ok(new) => client = Some((current, new)),
+                Err(error) => {
+                    warn!(error = %format!("{error:#}"), "could not build the heartbeat client");
+                    continue;
+                }
+            }
+        }
+        let Some((_, client)) = &client else { continue };
+        match client.heartbeat(&owner).await {
+            Err(error) if !failing => {
+                failing = true;
+                warn!(error = %format!("{error:#}"), "heartbeats to the computer are failing, its sessions end 30 s after the last one arrived");
+            }
+            Ok(()) if failing => {
+                failing = false;
+                info!("heartbeats to the computer work again");
+            }
+            Err(_) | Ok(()) => {}
         }
     }
 }

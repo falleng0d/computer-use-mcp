@@ -67,17 +67,33 @@ async fn serve() -> anyhow::Result<()> {
 async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
 
-    let Ok(mut terminate) = signal(SignalKind::terminate()) else {
+    let (Ok(mut terminate), Ok(mut hangup)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::hangup()),
+    ) else {
         let _ = tokio::signal::ctrl_c().await;
         return;
     };
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = terminate.recv() => {}
+        _ = hangup.recv() => {}
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+async fn shutdown_signal() {
+    let Ok(mut close) = tokio::signal::windows::ctrl_close() else {
+        let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = close.recv() => {}
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
