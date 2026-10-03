@@ -10,6 +10,8 @@ An MCP server that gives AI agents a computer. Any MCP client, such as Claude Co
 - When an agent starts the MCP server, the server starts the container if it is stopped, or creates it if it does not exist. The server never stops the container.
 - Every agent connected through the MCP server sees and controls the same desktop.
 - Files in the volume survive container restarts and container deletion. Only you stop or delete the computer, with `docker stop` or `docker rm`.
+- The computer is Debian 13 with Python 3, uv, Node.js 24 (LTS), Git, `gh`, the AWS CLI v2, Ruby, fish (bash stays the default shell), build tools, ripgrep, ImageMagick, clipboard tools, and fonts for Latin, CJK, and emoji.
+- The user `computer` has passwordless `sudo`, so agents can `sudo apt-get install` more. Only home survives when the container is recreated, so system packages are lost then. `npm install -g` and `pip install` go to `~/.local` (first on `PATH`) and survive.
 - The container logs print the VNC link and credentials, so you can reopen a closed VNC session.
 
 The project has three Rust crates:
@@ -62,7 +64,7 @@ just            # list recipes
 just check      # fmt check, clippy with -D warnings, tests
 just info       # run the host binary's info command
 just image      # build the computer-use-mcp:dev image
-just image-check  # build the image and call its health endpoint
+just image-check  # build the image, check every tool runs, and call the health endpoint
 ```
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org). `feat:` and `fix:` decide the next version and the changelog entry.
