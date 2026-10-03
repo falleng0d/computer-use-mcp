@@ -1199,6 +1199,23 @@ mod tests {
                 .contains("exit code: 0")
         );
 
+        let launch = |uri: &str| {
+            serde_json::from_value::<LaunchAppArgs>(serde_json::json!({
+                "session": page.as_str(),
+                "application": "browser",
+                "uri": uri,
+            }))
+            .unwrap()
+        };
+        for refused in [
+            "javascript:alert(1)",
+            "chrome://policy",
+            "file:///etc/passwd",
+        ] {
+            let error = server.launch(launch(refused)).await.unwrap_err();
+            assert!(error.to_string().contains(refused), "{error:#}");
+        }
+
         server.end(page.as_str()).await.unwrap();
         let after = shell(&format!(
             "pgrep -c chromium; ls -A {profile} | grep -c '^Singleton'; true"

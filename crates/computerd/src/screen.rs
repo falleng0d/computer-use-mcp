@@ -465,9 +465,8 @@ impl Screen {
             browser.close().await;
         }
         for mut app in std::mem::take(&mut self.apps) {
-            if app.start_kill().is_ok() {
-                let _ = tokio::time::timeout(STOP_TIMEOUT, app.wait()).await;
-            }
+            kill_group(&mut app);
+            let _ = tokio::time::timeout(STOP_TIMEOUT, app.wait()).await;
         }
         self.processes.stop().await;
     }
@@ -507,13 +506,12 @@ impl Screen {
             browser::classify(input, cwd, &workdir::home_dir()).map_err(ScreenError::Rejected)?;
         let settle = match target {
             Target::Url(url) => {
-                self.show_in_browser(Some(&url)).await?;
+                self.show_resolved(Some(&url)).await?;
                 PAGE_SETTLE
             }
             Target::BrowserFile(path) => {
                 check_file(&path).await?;
-                self.show_in_browser(Some(&browser::file_url(&path)))
-                    .await?;
+                self.show_resolved(Some(&browser::file_url(&path))).await?;
                 PAGE_SETTLE
             }
             Target::DefaultApp(path) => {
@@ -562,13 +560,18 @@ impl Screen {
         let windows = self.windows().await?;
         let in_window = |class: &str| plan::pick_window(&windows, class).map(|window| window.id);
         match app {
-            Some(App::Browser) => self.show_in_browser(uri).await,
+            Some(App::Browser) => self.show_in_browser(uri, cwd).await,
             Some(App::Terminal) => {
                 let existing = in_window(TERMINAL_CLASS);
                 self.raise_or_start(existing, "Terminal", apps::terminal_argv(), cwd)
                     .await
             }
             Some(App::Command { label, argv }) => {
+                if uri.is_some_and(|uri| uri.starts_with('-')) {
+                    return Err(ScreenError::Rejected(format!(
+                        "the uri {uri:?} starts with a dash, so {label} would read it as an option"
+                    )));
+                }
                 let program = argv[0].rsplit('/').next().unwrap_or_default();
                 let existing = if uri.is_some() {
                     None
@@ -600,9 +603,37 @@ impl Screen {
         }
     }
 
-    /// Opens `url` in the screen's browser, or just raises it without one. Starts the browser
-    /// first when it is not running.
-    pub async fn show_in_browser(&mut self, url: Option<&str>) -> Result<(), ScreenError> {
+    /// Opens a page in the screen's browser, or just raises it without one. `input` is an http(s)
+    /// URL or a file the browser shows, and a relative path starts at `cwd`.
+    pub async fn show_in_browser(
+        &mut self,
+        input: Option<&str>,
+        cwd: &Path,
+    ) -> Result<(), ScreenError> {
+        let url = match input {
+            None => None,
+            Some(input) => {
+                let target = browser::classify(input, cwd, &workdir::home_dir())
+                    .map_err(ScreenError::Rejected)?;
+                Some(match target {
+                    Target::Url(url) => url,
+                    Target::BrowserFile(path) => {
+                        check_file(&path).await?;
+                        browser::file_url(&path)
+                    }
+                    Target::DefaultApp(_) => {
+                        return Err(ScreenError::Rejected(format!(
+                            "{input} is not a page or a file the browser shows. Give an http(s) URL or an HTML, PDF, image, text, JSON, or XML file"
+                        )));
+                    }
+                })
+            }
+        };
+        self.show_resolved(url.as_deref()).await
+    }
+
+    /// Opens a checked `url` in the screen's browser, starting the browser when it is not running.
+    async fn show_resolved(&mut self, url: Option<&str>) -> Result<(), ScreenError> {
         let number = self.number;
         if let Some(browser) = self.browser.as_mut()
             && browser.is_running()
@@ -682,7 +713,8 @@ impl Screen {
         } else {
             workdir::home_dir()
         };
-        let mut child = Command::new(&argv[0])
+        let mut command = Command::new(&argv[0]);
+        command
             .args(&argv[1..])
             .env_clear()
             .envs(env::from_process(Some(self.number)))
@@ -690,11 +722,12 @@ impl Screen {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| {
-                ScreenError::Rejected(format!("cannot start {label} ({}): {error}", argv[0]))
-            })?;
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = command.spawn().map_err(|error| {
+            ScreenError::Rejected(format!("cannot start {label} ({}): {error}", argv[0]))
+        })?;
         if let Some(status) = self.wait_for_window(&before, Some(&mut child)).await? {
             let hint = if argv[0] == OPEN_COMMAND {
                 ". No installed application opens this kind of file"
@@ -706,7 +739,9 @@ impl Screen {
                 argv[0]
             )));
         }
-        self.apps.push(child);
+        if matches!(child.try_wait(), Ok(None)) {
+            self.apps.push(child);
+        }
         Ok(())
     }
 }
@@ -719,6 +754,20 @@ async fn check_file(path: &Path) -> Result<(), ScreenError> {
             path.display()
         ))),
     }
+}
+
+/// Kills the process group an application was started in.
+#[cfg(target_os = "linux")]
+fn kill_group(app: &mut Child) {
+    if let Some(group) = app.id().and_then(|pid| i32::try_from(pid).ok()) {
+        // SAFETY: killpg takes plain integers and has no memory effects. At worst the group is gone.
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kill_group(app: &mut Child) {
+    let _ = app.start_kill();
 }
 
 /// Resolves an application name using the installed `.desktop` files and the daemon's `PATH`.

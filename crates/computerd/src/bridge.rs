@@ -3,13 +3,14 @@
 //! The port is not published. A request is one text line, `browser <screen> [url]`, and the
 //! answer is `ok` or `error <message>`. Other text, such as a web page's HTTP request, is refused.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use computer_protocol::SCREEN_COUNT;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
+    sync::Semaphore,
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
@@ -19,6 +20,8 @@ use crate::sessions::Sessions;
 
 pub const PORT: u16 = 7071;
 const MAX_LINE_BYTES: u64 = 4096;
+/// Requests handled at once. Others wait in the listen queue.
+const MAX_REQUESTS: usize = 16;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Longest wait for an answer, which covers starting the browser.
@@ -72,12 +75,24 @@ impl Request {
 /// Answers requests until `stop` is cancelled. Requests being handled are dropped then.
 pub async fn serve(listener: TcpListener, sessions: Sessions, stop: CancellationToken) {
     let mut handlers = JoinSet::new();
+    let slots = Arc::new(Semaphore::new(MAX_REQUESTS));
     loop {
+        let acquired = tokio::select! {
+            () = stop.cancelled() => None,
+            slot = Arc::clone(&slots).acquire_owned() => slot.ok(),
+        };
+        let Some(slot) = acquired else {
+            break;
+        };
         tokio::select! {
             () = stop.cancelled() => break,
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
-                    handlers.spawn(answer(stream, sessions.clone()));
+                    let sessions = sessions.clone();
+                    handlers.spawn(async move {
+                        answer(stream, sessions).await;
+                        drop(slot);
+                    });
                 }
                 Err(error) => {
                     warn!(%error, "could not accept a browser request");

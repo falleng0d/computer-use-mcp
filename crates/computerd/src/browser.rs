@@ -278,9 +278,38 @@ fn clear_locks(profile: &Path) {
     }
 }
 
+/// Process id in the `SingletonLock` link target, which Chromium writes as `<host>-<pid>`.
+fn lock_pid(target: &str) -> Option<u32> {
+    target.rsplit_once('-')?.1.parse().ok()
+}
+
+/// Whether the process that holds the profile lock is a running Chromium on this profile.
+fn lock_holder_alive(profile: &Path) -> bool {
+    let Ok(target) = std::fs::read_link(profile.join("SingletonLock")) else {
+        return false;
+    };
+    let Some(pid) = target.to_str().and_then(lock_pid) else {
+        return false;
+    };
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    String::from_utf8_lossy(&cmdline).contains(&*profile.to_string_lossy())
+}
+
 /// Creates the profile folder and removes lock files a killed Chromium left behind.
-fn prepare_profile(profile: &Path) -> std::io::Result<()> {
+///
+/// # Errors
+///
+/// Fails when a Chromium that is still running holds the profile.
+fn prepare_profile(profile: &Path) -> Result<()> {
     std::fs::create_dir_all(profile)?;
+    if lock_holder_alive(profile) {
+        bail!(
+            "a Chromium from an earlier session is still running on {}, close it or wait for it to exit",
+            profile.display()
+        );
+    }
     clear_locks(profile);
     Ok(())
 }
@@ -352,6 +381,13 @@ mod tests {
             file_url(Path::new("/home/computer/a b#1?.html")),
             "file:///home/computer/a%20b%231%3F.html"
         );
+    }
+
+    #[test]
+    fn the_lock_target_names_the_process() {
+        assert_eq!(lock_pid("my-host-4242"), Some(4242));
+        assert_eq!(lock_pid("nohyphen"), None);
+        assert_eq!(lock_pid("host-abc"), None);
     }
 
     #[test]

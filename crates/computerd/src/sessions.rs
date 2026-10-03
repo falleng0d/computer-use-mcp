@@ -488,8 +488,9 @@ impl Sessions {
             .find(|(_, session)| session.screen() == Some(screen))
             .map(|(id, _)| id.clone())
             .ok_or_else(|| SessionError::Rejected(format!("screen {screen} is not in use")))?;
+        let cwd = self.cwd_of(&id)?;
         self.with_screen(&id, LAUNCH_TIMEOUT, async |screen| {
-            screen.show_in_browser(url.as_deref()).await
+            screen.show_in_browser(url.as_deref(), &cwd).await
         })
         .await
         .map(|_| ())
