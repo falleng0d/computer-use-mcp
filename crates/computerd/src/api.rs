@@ -10,8 +10,8 @@ use axum::{
 };
 use computer_protocol::{
     ActReply, ActRequest, ApiError, CreateSession, Health, ListFilesReply, ListFilesRequest,
-    Observation, PROTOCOL_VERSION, ReadFileReply, ReadFileRequest, SessionCreated, SessionId,
-    SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, VERSION, WriteFileReply,
+    Observation, OwnerId, PROTOCOL_VERSION, ReadFileReply, ReadFileRequest, SessionCreated,
+    SessionId, SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, VERSION, WriteFileReply,
     WriteFileRequest,
 };
 use tracing::error;
@@ -38,6 +38,8 @@ pub fn router(token: String, sessions: Sessions) -> Router {
         .route("/health", get(health))
         .route("/sessions", post(create_session))
         .route("/sessions/{id}", delete(end_session))
+        .route("/owners/{owner}", delete(end_owner))
+        .route("/owners/{owner}/heartbeat", post(heartbeat))
         .route("/sessions/{id}/observe", post(observe))
         .route("/sessions/{id}/act", post(act))
         .route("/sessions/{id}/shell", post(shell))
@@ -84,12 +86,7 @@ async fn create_session(
 ) -> (StatusCode, Json<SessionCreated>) {
     let id = SessionId::parse(&Uuid::new_v4().simple().to_string())
         .expect("a simple UUID is 32 lowercase hex digits");
-    state.sessions.insert(
-        id.clone(),
-        request.title,
-        request.screen_size,
-        request.shell_timeouts,
-    );
+    state.sessions.insert(id.clone(), request);
     (StatusCode::CREATED, Json(SessionCreated { session: id }))
 }
 
@@ -99,6 +96,16 @@ async fn end_session(
 ) -> Result<StatusCode, SessionError> {
     state.sessions.end(&id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn heartbeat(State(state): State<AppState>, Path(owner): Path<OwnerId>) -> StatusCode {
+    state.sessions.heartbeat(&owner);
+    StatusCode::NO_CONTENT
+}
+
+async fn end_owner(State(state): State<AppState>, Path(owner): Path<OwnerId>) -> StatusCode {
+    state.sessions.end_owner(&owner).await;
+    StatusCode::NO_CONTENT
 }
 
 async fn observe(
@@ -160,6 +167,7 @@ impl IntoResponse for SessionError {
     fn into_response(self) -> Response {
         let status = match self {
             Self::Unknown => StatusCode::NOT_FOUND,
+            Self::Ended(_) => StatusCode::GONE,
             Self::NoFreeScreen => StatusCode::SERVICE_UNAVAILABLE,
             Self::Rejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -224,7 +232,7 @@ mod tests {
             "POST",
             "/sessions",
             Some(TOKEN),
-            r#"{"title":"fix the build","screen_size":"1280x800","shell_timeouts":{"default_secs":120,"max_secs":600}}"#,
+            r#"{"title":"fix the build","screen_size":"1280x800","shell_timeouts":{"default_secs":120,"max_secs":600},"owner":"00000000000000000000000000000000","idle_secs":3600}"#,
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
@@ -254,7 +262,7 @@ mod tests {
             "POST",
             "/sessions",
             Some(TOKEN),
-            r#"{"title":"  ","screen_size":"1280x800","shell_timeouts":{"default_secs":120,"max_secs":600}}"#,
+            r#"{"title":"  ","screen_size":"1280x800","shell_timeouts":{"default_secs":120,"max_secs":600},"owner":"00000000000000000000000000000000","idle_secs":3600}"#,
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);

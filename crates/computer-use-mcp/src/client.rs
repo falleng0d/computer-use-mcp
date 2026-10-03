@@ -1,11 +1,11 @@
-use std::time::Duration;
+use std::{num::NonZeroU32, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use computer_protocol::{
     ActReply, ActRequest, ApiError, CreateSession, Health, ListFilesReply, ListFilesRequest,
-    Observation, PROTOCOL_VERSION, ReadFileReply, ReadFileRequest, ScreenSize, SessionCreated,
-    SessionId, SessionTitle, SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts,
-    VERSION, WriteFileReply, WriteFileRequest,
+    Observation, OwnerId, PROTOCOL_VERSION, ReadFileReply, ReadFileRequest, ScreenSize,
+    SessionCreated, SessionId, SessionTitle, SetCwdReply, SetCwdRequest, ShellReply, ShellRequest,
+    ShellTimeouts, VERSION, WriteFileReply, WriteFileRequest,
 };
 use reqwest::StatusCode;
 
@@ -20,12 +20,17 @@ const SHELL_MARGIN: Duration = Duration::from_secs(30);
 const FILE_TIMEOUT: Duration = Duration::from_secs(60);
 const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const HEALTH_DEADLINE: Duration = Duration::from_secs(60);
+/// Longest wait for `computerd` when the MCP server is shutting down.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const HEALTH_RETRY: Duration = Duration::from_millis(250);
 
-/// Why a call to a session failed in a way the agent can fix by starting over.
+/// A call named a session `computerd` does not have, which the agent fixes by starting over.
 #[derive(Debug, thiserror::Error)]
 #[error("unknown session, call start_computer first")]
-pub struct UnknownSession;
+pub struct UnknownSession {
+    /// Why the session ended, when `computerd` still remembers it.
+    pub reason: Option<String>,
+}
 
 pub struct Client {
     http: reqwest::Client,
@@ -88,6 +93,8 @@ impl Client {
         title: SessionTitle,
         screen_size: ScreenSize,
         shell_timeouts: ShellTimeouts,
+        owner: OwnerId,
+        idle_secs: NonZeroU32,
     ) -> Result<SessionId> {
         let created: SessionCreated = self
             .http
@@ -97,6 +104,8 @@ impl Client {
                 title,
                 screen_size,
                 shell_timeouts,
+                owner,
+                idle_secs,
             })
             .send()
             .await
@@ -118,12 +127,33 @@ impl Client {
             .send()
             .await
             .context("ending the session")?;
-        if response.status() == StatusCode::NOT_FOUND {
-            return Err(UnknownSession.into());
-        }
-        response
+        check(response).await.map(|_| ())
+    }
+
+    /// Tells `computerd` the owner is alive, which keeps all its sessions.
+    pub async fn heartbeat(&self, owner: &OwnerId) -> Result<()> {
+        self.http
+            .post(format!("{}/owners/{owner}/heartbeat", self.base))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .context("sending a heartbeat")?
             .error_for_status()
-            .context("ending the session")
+            .context("sending a heartbeat")
+            .map(|_| ())
+    }
+
+    /// Ends every session of the owner. Gives up after a few seconds.
+    pub async fn end_owner(&self, owner: &OwnerId) -> Result<()> {
+        self.http
+            .delete(format!("{}/owners/{owner}", self.base))
+            .bearer_auth(&self.token)
+            .timeout(SHUTDOWN_TIMEOUT)
+            .send()
+            .await
+            .context("ending the sessions of this server")?
+            .error_for_status()
+            .context("ending the sessions of this server")
             .map(|_| ())
     }
 }
@@ -141,18 +171,8 @@ impl Client {
             .send()
             .await
             .context("asking the computer for a screenshot")?;
-        let status = response.status();
-        if status == StatusCode::NOT_FOUND {
-            return Err(UnknownSession.into());
-        }
-        if !status.is_success() {
-            let message = match response.json::<ApiError>().await {
-                Ok(error) => error.message,
-                Err(_) => format!("the computer answered {status}"),
-            };
-            bail!("{message}");
-        }
-        response
+        check(response)
+            .await?
             .json()
             .await
             .context("reading the screenshot reply")
@@ -171,18 +191,8 @@ impl Client {
             .send()
             .await
             .context("sending the actions to the computer")?;
-        let status = response.status();
-        if status == StatusCode::NOT_FOUND {
-            return Err(UnknownSession.into());
-        }
-        if !status.is_success() {
-            let message = match response.json::<ApiError>().await {
-                Ok(error) => error.message,
-                Err(_) => format!("the computer answered {status}"),
-            };
-            bail!("{message}");
-        }
-        response
+        check(response)
+            .await?
             .json()
             .await
             .context("reading the reply to the actions")
@@ -285,16 +295,25 @@ async fn read_reply<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,
     reading: &'static str,
 ) -> Result<T> {
+    check(response).await?.json().await.context(reading)
+}
+
+/// Passes a successful response on. Turns a missing session into [`UnknownSession`] and other failures into the computer's message.
+async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
     let status = response.status();
-    if status == StatusCode::NOT_FOUND {
-        return Err(UnknownSession.into());
+    if status.is_success() {
+        return Ok(response);
     }
-    if !status.is_success() {
-        let message = match response.json::<ApiError>().await {
-            Ok(error) => error.message,
-            Err(_) => format!("the computer answered {status}"),
-        };
-        bail!("{message}");
+    let message = match response.json::<ApiError>().await {
+        Ok(error) => Some(error.message),
+        Err(_) => None,
+    };
+    match status {
+        StatusCode::NOT_FOUND => Err(UnknownSession { reason: None }.into()),
+        StatusCode::GONE => Err(UnknownSession { reason: message }.into()),
+        _ => bail!(
+            "{}",
+            message.unwrap_or_else(|| format!("the computer answered {status}"))
+        ),
     }
-    response.json().await.context(reading)
 }

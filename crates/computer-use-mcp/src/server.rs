@@ -1,22 +1,30 @@
-use std::sync::Arc;
+use std::{
+    num::NonZeroU32,
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
 use anyhow::Context;
 use computer_protocol::{
-    ActRequest, DEFAULT_SHELL_TIMEOUT_MAX_SECS, DEFAULT_SHELL_TIMEOUT_SECS, ListFilesRequest,
-    RawAction, ReadFileRequest, ScreenSize, SessionId, SessionTitle, ShellRequest, ShellTimeouts,
-    WriteFileRequest,
+    ActRequest, DEFAULT_IDLE_SECS, DEFAULT_SHELL_TIMEOUT_MAX_SECS, DEFAULT_SHELL_TIMEOUT_SECS,
+    HEARTBEAT_INTERVAL_SECS, ListFilesRequest, OwnerId, RawAction, ReadFileRequest, ScreenSize,
+    SessionId, SessionTitle, ShellRequest, ShellTimeouts, WriteFileRequest,
 };
 use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, schemars, tool, tool_handler,
     tool_router,
 };
 use serde::Deserialize;
-use tokio::sync::{Mutex, OnceCell};
-use tracing::error;
+use tokio::{
+    sync::{Mutex, OnceCell, watch},
+    task::JoinHandle,
+};
+use tracing::{debug, error};
+use uuid::Uuid;
 
 use crate::{
     client::{Client, UnknownSession},
-    computer::{Docked, Settings},
+    computer::{Docked, Endpoint, Settings},
     file_result,
     image::{self, Image},
     observation, shell_result,
@@ -26,6 +34,118 @@ const START_FIRST: &str = "call start_computer first";
 const SCREEN_SIZE_ENV: &str = "COMPUTER_USE_SCREEN_SIZE";
 const SHELL_TIMEOUT_ENV: &str = "COMPUTER_USE_SHELL_TIMEOUT";
 const SHELL_TIMEOUT_MAX_ENV: &str = "COMPUTER_USE_SHELL_TIMEOUT_MAX";
+const IDLE_TIMEOUT_ENV: &str = "COMPUTER_USE_IDLE_TIMEOUT";
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(HEARTBEAT_INTERVAL_SECS);
+
+/// Message for a call on a session that ended, or that `computerd` never knew.
+fn gone(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<UnknownSession>() {
+        Some(UnknownSession {
+            reason: Some(reason),
+        }) => anyhow::anyhow!("{reason}, call start_computer to get a new session"),
+        Some(_) => anyhow::anyhow!(START_FIRST),
+        None => error,
+    }
+}
+
+/// Reads an idle time such as `90`, `90s`, `30m`, or `2h`. Unset or empty gives the default.
+fn parse_idle(value: Option<&str>) -> Result<NonZeroU32, String> {
+    let Some(text) = value.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(NonZeroU32::new(DEFAULT_IDLE_SECS).expect("the default idle time is not zero"));
+    };
+    let (digits, unit) = match text.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((at, _)) => text.split_at(at),
+        None => (text, "s"),
+    };
+    let factor = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        _ => 0,
+    };
+    digits
+        .parse::<u32>()
+        .ok()
+        .and_then(|number| number.checked_mul(factor))
+        .and_then(NonZeroU32::new)
+        .ok_or_else(|| {
+            format!("{IDLE_TIMEOUT_ENV}={text}: expected a time above zero such as 90, 30m, or 2h")
+        })
+}
+
+fn idle_from_env() -> Result<NonZeroU32, String> {
+    parse_idle(std::env::var(IDLE_TIMEOUT_ENV).ok().as_deref())
+}
+
+/// Sends heartbeats for the sessions of this process and ends them at shutdown.
+///
+/// Nothing runs until the first session exists, so a process that never starts a computer never calls Docker or HTTP.
+struct Heartbeats {
+    owner: OwnerId,
+    endpoint: watch::Sender<Option<Endpoint>>,
+    task: StdMutex<Option<JoinHandle<()>>>,
+}
+
+impl Heartbeats {
+    fn new() -> Self {
+        let owner = OwnerId::parse(&Uuid::new_v4().simple().to_string())
+            .expect("a simple UUID is 32 lowercase hex digits");
+        Self {
+            owner,
+            endpoint: watch::channel(None).0,
+            task: StdMutex::new(None),
+        }
+    }
+
+    /// Starts the heartbeat task if needed and points it at the computer's current endpoint.
+    fn start(&self, endpoint: &Endpoint) {
+        self.endpoint.send_replace(Some(endpoint.clone()));
+        let mut task = self
+            .task
+            .lock()
+            .expect("the heartbeat task lock is only held to start or stop it");
+        if task.is_none() {
+            let owner = self.owner.clone();
+            let endpoint = self.endpoint.subscribe();
+            *task = Some(tokio::spawn(beat(owner, endpoint)));
+        }
+    }
+
+    /// Stops the heartbeats and ends this process's sessions, giving up after a few seconds.
+    async fn stop(&self) {
+        let task = self
+            .task
+            .lock()
+            .expect("the heartbeat task lock is only held to start or stop it")
+            .take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        let endpoint = self.endpoint.borrow().clone();
+        if let Some(endpoint) = endpoint {
+            let ended = async { Client::new(&endpoint)?.end_owner(&self.owner).await }.await;
+            if let Err(error) = ended {
+                error!(error = %format!("{error:#}"), "could not end the sessions at shutdown");
+            }
+        }
+    }
+}
+
+async fn beat(owner: OwnerId, endpoint: watch::Receiver<Option<Endpoint>>) {
+    let mut tick = tokio::time::interval(HEARTBEAT_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await;
+    loop {
+        tick.tick().await;
+        let endpoint = endpoint.borrow().clone();
+        let Some(endpoint) = endpoint else { continue };
+        let sent = async { Client::new(&endpoint)?.heartbeat(&owner).await }.await;
+        if let Err(error) = sent {
+            debug!(error = %format!("{error:#}"), "heartbeat failed");
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct StartComputerArgs {
@@ -150,6 +270,8 @@ pub struct Server {
     settings: Settings,
     screen_size: Result<ScreenSize, String>,
     shell_timeouts: Result<ShellTimeouts, String>,
+    idle: Result<NonZeroU32, String>,
+    heartbeats: Arc<Heartbeats>,
     image: Image,
     docked: Arc<OnceCell<Docked>>,
     start_lock: Arc<Mutex<()>>,
@@ -162,6 +284,7 @@ impl Server {
             image::from_env(),
             screen_size_from_env(),
             shell_timeouts_from_env(),
+            idle_from_env(),
         )
     }
 
@@ -170,11 +293,14 @@ impl Server {
         image: Image,
         screen_size: Result<ScreenSize, String>,
         shell_timeouts: Result<ShellTimeouts, String>,
+        idle: Result<NonZeroU32, String>,
     ) -> Self {
         Self {
             settings,
             screen_size,
             shell_timeouts,
+            idle,
+            heartbeats: Arc::new(Heartbeats::new()),
             image,
             docked: Arc::default(),
             start_lock: Arc::default(),
@@ -196,6 +322,10 @@ impl Server {
             .clone()
             .map_err(|message| anyhow::anyhow!(message))?;
         let shell_timeouts = self.shell_timeouts()?;
+        let idle_secs = self
+            .idle
+            .clone()
+            .map_err(|message| anyhow::anyhow!(message))?;
         let docked = self.docked().await?;
         let endpoint = {
             let _starting = self.start_lock.lock().await;
@@ -203,9 +333,22 @@ impl Server {
         };
         let client = Client::new(&endpoint)?;
         client.wait_until_ready(docked.name()).await?;
-        client
-            .create_session(title, screen_size, shell_timeouts)
-            .await
+        let session = client
+            .create_session(
+                title,
+                screen_size,
+                shell_timeouts,
+                self.heartbeats.owner.clone(),
+                idle_secs,
+            )
+            .await?;
+        self.heartbeats.start(&endpoint);
+        Ok(session)
+    }
+
+    /// Ends every session this process started. Call before the process exits.
+    pub async fn shutdown(&self) {
+        self.heartbeats.stop().await;
     }
 
     /// Client for the running computer, or the `START_FIRST` error.
@@ -223,7 +366,7 @@ impl Server {
     async fn observe(&self, session: &str) -> anyhow::Result<CallToolResult> {
         let (session, client) = self.client_for(session).await?;
         match client.observe(&session).await {
-            Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
             other => other.map(observation::tool_result),
         }
     }
@@ -232,7 +375,7 @@ impl Server {
         let request = ActRequest::parse(&args.actions, args.observe, args.settle_ms)?;
         let (session, client) = self.client_for(&args.session).await?;
         match client.act(&session, &request).await {
-            Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
             other => other.map(observation::act_result),
         }
     }
@@ -253,7 +396,7 @@ impl Server {
             .shell(&session, &request, self.shell_timeouts()?)
             .await
         {
-            Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
             other => other.map(|reply| shell_result::tool_result(&reply)),
         }
     }
@@ -261,7 +404,7 @@ impl Server {
     async fn change_cwd(&self, args: SetCwdArgs) -> anyhow::Result<String> {
         let (session, client) = self.client_for(&args.session).await?;
         match client.set_cwd(&session, args.path).await {
-            Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
             other => other.map(|reply| format!("working folder: {}", reply.cwd)),
         }
     }
@@ -270,7 +413,7 @@ impl Server {
         let (session, client) = self.client_for(&args.session).await?;
         let request = ListFilesRequest { path: args.path };
         match client.list_files(&session, &request).await {
-            Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
             other => other.map(|reply| file_result::describe_list(&reply)),
         }
     }
@@ -283,7 +426,7 @@ impl Server {
             limit: args.limit,
         };
         match client.read_file(&session, &request).await {
-            Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
             other => other.map(file_result::read_result),
         }
     }
@@ -295,7 +438,7 @@ impl Server {
             content: args.content,
         };
         match client.write_file(&session, &request).await {
-            Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
             other => other.map(|reply| file_result::describe_write(&reply)),
         }
     }
@@ -303,7 +446,7 @@ impl Server {
     async fn end(&self, session: &str) -> anyhow::Result<()> {
         let (session, client) = self.client_for(session).await?;
         match client.end_session(&session).await {
-            Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
             other => other,
         }
     }
@@ -514,6 +657,7 @@ mod tests {
             image::from_env(),
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
+            parse_idle(None),
         );
 
         let first = server.start("first task").await.unwrap();
@@ -535,6 +679,43 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs Docker"]
+    async fn shutting_down_ends_the_sessions_and_later_calls_say_why() {
+        let name = format!("computer-use-test-{}", Uuid::new_v4().simple());
+        let settings = Settings {
+            name: name.clone(),
+            timezone: None,
+        };
+        let docker = Docker::connect_with_defaults().unwrap();
+        let _cleanup = Cleanup {
+            docker,
+            name,
+            volume: settings.volume(),
+        };
+        let server = Server::new(
+            settings,
+            image::from_env(),
+            Ok(ScreenSize::default()),
+            Ok(ShellTimeouts::default()),
+            parse_idle(None),
+        );
+
+        let session = server.start("leaving").await.unwrap();
+        server.observe(session.as_str()).await.unwrap();
+        server.shutdown().await;
+
+        let message = server
+            .observe(session.as_str())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            message,
+            "this session ended because the MCP server that started it shut down, call start_computer to get a new session"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Docker"]
     async fn observing_shows_a_screen_then_omits_the_unchanged_frame() {
         let name = format!("computer-use-test-{}", Uuid::new_v4().simple());
         let settings = Settings {
@@ -552,6 +733,7 @@ mod tests {
             image::from_env(),
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
+            parse_idle(None),
         );
 
         let session = server.start("watcher").await.unwrap();
@@ -598,12 +780,14 @@ mod tests {
             image::from_env(),
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
+            parse_idle(None),
         );
         let two = Server::new(
             settings,
             image::from_env(),
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
+            parse_idle(None),
         );
 
         let (first, second) = tokio::join!(one.start("one"), two.start("two"));
@@ -648,6 +832,7 @@ mod tests {
             image::from_env(),
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
+            parse_idle(None),
         );
         let session = server.start("actor").await.unwrap();
 
@@ -744,6 +929,7 @@ mod tests {
             image::from_env(),
             Ok(ScreenSize::default()),
             Ok(timeouts),
+            parse_idle(None),
         );
         let session = server.start("shell user").await.unwrap();
         let run = |command: &'static str, timeout| {
@@ -836,6 +1022,7 @@ none
             image::from_env(),
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
+            parse_idle(None),
         );
         let writer = server.start("writer").await.unwrap();
         let reader = server.start("reader").await.unwrap();
@@ -908,6 +1095,21 @@ none
 
         server.end(writer.as_str()).await.unwrap();
         server.end(reader.as_str()).await.unwrap();
+    }
+
+    #[test]
+    fn idle_time_accepts_seconds_minutes_and_hours_and_refuses_the_rest() {
+        let secs = |text| parse_idle(text).map(NonZeroU32::get);
+        assert_eq!(secs(None), Ok(3600));
+        assert_eq!(secs(Some("")), Ok(3600));
+        assert_eq!(secs(Some("90")), Ok(90));
+        assert_eq!(secs(Some(" 90s ")), Ok(90));
+        assert_eq!(secs(Some("30m")), Ok(1800));
+        assert_eq!(secs(Some("2h")), Ok(7200));
+        for bad in ["0", "0m", "m", "-5", "1d", "1.5h", "4294967295h"] {
+            let message = secs(Some(bad)).unwrap_err();
+            assert!(message.contains(IDLE_TIMEOUT_ENV), "{bad}: {message}");
+        }
     }
 
     #[test]

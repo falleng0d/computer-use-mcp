@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use serde::{Deserialize, Serialize};
 
 pub mod act;
@@ -18,7 +20,7 @@ pub use shell::{
 };
 
 /// Version of the wire format between the host and `computerd`.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 pub const RELEASE_VERSION: Option<&str> = match option_env!("COMPUTER_USE_MCP_VERSION") {
     Some(version) if !version.is_empty() => Some(version),
@@ -188,6 +190,76 @@ pub struct CreateSession {
     pub screen_size: ScreenSize,
     /// Timeouts for the session's shell commands.
     pub shell_timeouts: ShellTimeouts,
+    /// The MCP server process that keeps the session alive with heartbeats.
+    pub owner: OwnerId,
+    /// Seconds without agent calls after which the session ends.
+    pub idle_secs: NonZeroU32,
+}
+
+/// Seconds between the heartbeats an MCP server sends for its sessions.
+pub const HEARTBEAT_INTERVAL_SECS: u64 = 10;
+
+/// Seconds without a heartbeat after which the sessions of an owner end.
+pub const OWNER_TIMEOUT_SECS: u64 = 30;
+
+/// Seconds without agent calls after which a session ends, unless the host sets another time.
+pub const DEFAULT_IDLE_SECS: u32 = 3600;
+
+/// Length of an owner id, in hex digits.
+pub const OWNER_ID_LEN: usize = 32;
+
+/// Identifies one MCP server process: 32 lowercase hex digits, random per process.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct OwnerId(String);
+
+/// The text is not an owner id.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("not an owner id")]
+pub struct OwnerIdError;
+
+impl OwnerId {
+    /// Checks that the text is exactly 32 lowercase hex digits.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the text has another length or other characters.
+    pub fn parse(text: &str) -> Result<Self, OwnerIdError> {
+        let valid = text.len() == OWNER_ID_LEN
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if valid {
+            Ok(Self(text.to_owned()))
+        } else {
+            Err(OwnerIdError)
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for OwnerId {
+    type Error = OwnerIdError;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::parse(&text)
+    }
+}
+
+impl From<OwnerId> for String {
+    fn from(id: OwnerId) -> Self {
+        id.0
+    }
+}
+
+impl std::fmt::Display for OwnerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Length of a session id, in hex digits.

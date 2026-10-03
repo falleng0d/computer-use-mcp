@@ -39,6 +39,7 @@ Add it to your agent host as an MCP server that runs `computer-use-mcp` with no 
 | `COMPUTER_USE_SCREEN_SIZE` | `1280x800` | Size of each session's screen, as `<width>x<height>` with sides from 320 to 7680. Read when `start_computer` runs. |
 | `COMPUTER_USE_SHELL_TIMEOUT` | `120` | Seconds a `shell` command may run when the agent gives no timeout. Must not exceed the maximum. Read when `start_computer` runs. |
 | `COMPUTER_USE_SHELL_TIMEOUT_MAX` | `600` | Longest timeout an agent may ask for, in seconds. If the default is unset and this is lower than 120, the default follows it. Read when `start_computer` runs. |
+| `COMPUTER_USE_IDLE_TIMEOUT` | `1h` | Time without agent calls after which a session ends. Seconds (`90`) or a number with `s`, `m`, or `h` (`30m`, `2h`). Read when `start_computer` runs. |
 | `COMPUTER_USE_IMAGE` | Release builds use `ghcr.io/falleng0d/computer-use-mcp:<version>`. Dev builds use `computer-use-mcp:dev`. | Image used for the computer container. |
 
 Release builds pull their image when it is missing. Dev builds never pull, so a dev host binary is never paired with an old image by accident. Build the dev image with `just image`.
@@ -54,6 +55,8 @@ The server makes no Docker calls until an agent calls `start_computer`. That too
 `set_cwd` takes the session id and a path, resolves a relative path from the current working folder (`~` is home), and fails when the folder does not exist. It returns the new absolute path.
 
 `list_files`, `read_file`, and `write_file` take the session id and a path. Relative paths start at the session's working folder, `~` is home, and absolute paths work anywhere the user `computer` can reach. All sessions see the same files. `list_files` lists one folder (the working folder by default), folders first, with type, size, and modified time, and caps at 1000 entries. `read_file` returns UTF-8 text as text and PNG or JPEG files (up to 1 MB, found by their first bytes) as images. It refuses other binary files with a hint to use `shell`. Long text keeps its first and last 15000 bytes with a marker between them and a note, and the optional `offset` and `limit` (in lines, from 1) read a range. `write_file` replaces a file with UTF-8 content of up to 10 MB, creates missing folders, and writes atomically while keeping an existing file's permissions. It refuses a path that is a folder.
+
+Sessions end on their own, so a crashed or forgotten agent does not hold a screen. Each MCP server process sends a heartbeat every 10 s for all its sessions, and its sessions end 30 s after the last one, which covers a killed process. A session also ends after its idle time with no agent call. A running `shell` command counts as activity, so a long command never makes its own session idle. When the MCP server exits on stdin close, Ctrl+C, or SIGTERM, it ends its sessions at once, waiting at most 3 s. Ending a session closes its screen and frees its number. Files in home are never touched. A call on a session that ended on its own says why and asks the agent to call `start_computer` again.
 
 ## Development
 

@@ -13,6 +13,7 @@ mod guard;
     expect(dead_code, reason = "only the Linux screen types text")
 )]
 mod keys;
+mod liveness;
 mod plan;
 mod screen;
 mod sessions;
@@ -29,6 +30,7 @@ use std::net::SocketAddr;
 
 use anyhow::Context;
 use computer_protocol::{API_PORT, TOKEN_ENV, VERSION};
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 #[tokio::main]
@@ -47,6 +49,12 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("listening on {addr}"))?;
     info!(version = VERSION, %addr, "computerd started");
+    let stop_reaper = CancellationToken::new();
+    let reaper = {
+        let sessions = sessions.clone();
+        let stop = stop_reaper.clone();
+        tokio::spawn(async move { sessions.reap_until(stop).await })
+    };
     let stopping = sessions.clone();
     let served = axum::serve(listener, api::router(token, sessions.clone()))
         .with_graceful_shutdown(async move {
@@ -55,6 +63,8 @@ async fn main() -> anyhow::Result<()> {
         })
         .await
         .context("serving the API");
+    stop_reaper.cancel();
+    reaper.await.context("stopping the session reaper")?;
     sessions.close_all().await;
     served
 }
