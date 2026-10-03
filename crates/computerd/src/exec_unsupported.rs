@@ -10,6 +10,7 @@ pub struct Job {
     pub cwd: PathBuf,
     pub display: Option<u8>,
     pub timeout: Duration,
+    pub cancel: tokio_util::sync::CancellationToken,
 }
 
 #[expect(clippy::unused_async, reason = "same signature as the Linux version")]

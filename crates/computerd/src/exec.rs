@@ -13,6 +13,7 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::cap::Capture;
 
@@ -30,6 +31,8 @@ pub struct Job {
     pub cwd: PathBuf,
     pub display: Option<u8>,
     pub timeout: Duration,
+    /// Kills the command when cancelled.
+    pub cancel: CancellationToken,
 }
 
 /// Environment of a command: a few variables taken from the daemon's own, never its secrets.
@@ -111,9 +114,16 @@ pub async fn run(job: Job) -> anyhow::Result<ShellReply> {
         .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("starting bash in {}", job.cwd.display()))?;
+    let mut child = command.spawn().with_context(|| {
+        if job.cwd.is_dir() {
+            format!("starting bash in {}", job.cwd.display())
+        } else {
+            format!(
+                "the working folder {} no longer exists, call set_cwd to choose another",
+                job.cwd.display()
+            )
+        }
+    })?;
     let mut group = GroupKill(child.id().and_then(|pid| i32::try_from(pid).ok()));
     let stdout = child.stdout.take().context("bash has no stdout pipe")?;
     let stderr = child.stderr.take().context("bash has no stderr pipe")?;
@@ -123,19 +133,25 @@ pub async fn run(job: Job) -> anyhow::Result<ShellReply> {
         let mut read = std::pin::pin!(async {
             tokio::join!(pump(stdout, &mut out), pump(stderr, &mut err));
         });
-        let status = tokio::select! {
+        tokio::select! {
             status = child.wait() => {
+                group.disarm();
                 let _ = tokio::time::timeout(DRAIN_GRACE, &mut read).await;
                 status
             }
-            () = &mut read => child.wait().await,
-        };
-        group.disarm();
-        status
-    })
-    .await;
+            () = &mut read => {
+                let status = child.wait().await;
+                group.disarm();
+                status
+            }
+        }
+    });
+    let finished = tokio::select! {
+        finished = finished => Some(finished),
+        () = job.cancel.cancelled() => None,
+    };
 
-    let outcome = if let Ok(status) = finished {
+    let outcome = if let Some(Ok(status)) = finished {
         let status = status.context("waiting for bash")?;
         match (status.code(), status.signal()) {
             (Some(code), _) => ShellOutcome::Exited { code },
@@ -145,8 +161,12 @@ pub async fn run(job: Job) -> anyhow::Result<ShellReply> {
     } else {
         group.kill();
         let _ = tokio::time::timeout(REAP_TIMEOUT, child.wait()).await;
-        ShellOutcome::TimedOut {
-            after_secs: job.timeout.as_secs(),
+        if finished.is_none() {
+            ShellOutcome::Cancelled
+        } else {
+            ShellOutcome::TimedOut {
+                after_secs: job.timeout.as_secs(),
+            }
         }
     };
     Ok(ShellReply {
@@ -167,6 +187,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             display: None,
             timeout,
+            cancel: CancellationToken::new(),
         }
     }
 
@@ -233,6 +254,28 @@ mod tests {
             pgrep(&marker).is_empty(),
             "a child survived the dropped call"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelling_kills_the_group_and_returns_at_once() {
+        let marker = format!("computerd-cancel-{}", std::process::id());
+        let command = format!("echo begun; (exec -a {marker} sleep 1000) & wait");
+        let running = job(&command, Duration::from_secs(60));
+        let cancel = running.cancel.clone();
+        let started = Instant::now();
+        let (reply, ()) = tokio::join!(run(running), async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            cancel.cancel();
+        });
+        let reply = reply.unwrap();
+        assert_eq!(reply.outcome, ShellOutcome::Cancelled);
+        assert_eq!(
+            reply.stdout,
+            "begun
+"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(pgrep(&marker).is_empty(), "a child survived the cancel");
     }
 
     #[tokio::test]

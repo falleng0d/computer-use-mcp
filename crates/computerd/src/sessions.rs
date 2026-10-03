@@ -9,6 +9,7 @@ use computer_protocol::{
     ActReply, ActRequest, Observation, ScreenSize, SessionId, SessionTitle, SetCwdReply,
     SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::{
@@ -43,6 +44,8 @@ struct Session {
     title: SessionTitle,
     screen_size: ScreenSize,
     shell_timeouts: ShellTimeouts,
+    /// Cancelled when the session ends or the computer shuts down. Kills the session's running commands.
+    cancel: CancellationToken,
     /// Folder shell commands start in.
     cwd: Mutex<PathBuf>,
     /// Display number of the open screen. Shell calls read it without touching the screen lock.
@@ -73,6 +76,7 @@ pub struct Sessions {
     map: Arc<Mutex<HashMap<SessionId, Arc<Session>>>>,
     numbers: Numbers,
     home: PathBuf,
+    shutdown: CancellationToken,
 }
 
 impl Default for Sessions {
@@ -81,6 +85,7 @@ impl Default for Sessions {
             map: Arc::default(),
             numbers: Numbers::default(),
             home: workdir::home_dir(),
+            shutdown: CancellationToken::new(),
         }
     }
 }
@@ -98,6 +103,7 @@ impl Sessions {
             title,
             screen_size,
             shell_timeouts,
+            cancel: self.shutdown.child_token(),
             cwd: Mutex::new(self.home.clone()),
             display: Mutex::new(None),
             screen: Arc::new(tokio::sync::Mutex::new(Slot::Unopened)),
@@ -119,6 +125,7 @@ impl Sessions {
     pub async fn end(&self, id: &SessionId) -> Result<(), SessionError> {
         let session = self.lock().remove(id).ok_or(SessionError::Unknown)?;
         info!(session = %id, title = session.title.as_str(), "session ended");
+        session.cancel.cancel();
         session.screen.lock().await.close().await;
         Ok(())
     }
@@ -205,6 +212,7 @@ impl Sessions {
             cwd: lock(&session.cwd).clone(),
             display: *lock(&session.display),
             timeout: session.shell_timeouts.effective(request.timeout_secs),
+            cancel: session.cancel.clone(),
         };
         exec::run(job).await.map_err(SessionError::Failed)
     }
@@ -229,6 +237,11 @@ impl Sessions {
     /// The session's working folder, the base of relative paths.
     pub fn cwd(&self, id: &SessionId) -> Result<PathBuf, SessionError> {
         Ok(lock(&self.get(id)?.cwd).clone())
+    }
+
+    /// Kills every running command and refuses new ones. Called when `computerd` starts to shut down.
+    pub fn cancel_all(&self) {
+        self.shutdown.cancel();
     }
 
     /// Closes every screen. Called when `computerd` shuts down.

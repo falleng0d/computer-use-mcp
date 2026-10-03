@@ -50,8 +50,12 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("listening on {addr}"))?;
     info!(version = VERSION, %addr, "computerd started");
+    let stopping = sessions.clone();
     let served = axum::serve(listener, api::router(token, sessions.clone()))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            stopping.cancel_all();
+        })
         .await
         .context("serving the API");
     sessions.close_all().await;

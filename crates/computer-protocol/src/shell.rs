@@ -119,6 +119,8 @@ pub enum ShellOutcome {
         signal: i32,
     },
     /// The command ran out of time and its whole process group was killed.
+    /// The session ended or the computer shut down while the command ran, and its whole process group was killed.
+    Cancelled,
     TimedOut {
         after_secs: u64,
     },

@@ -6,6 +6,7 @@ pub fn describe(reply: &ShellReply) -> String {
     let how = match reply.outcome {
         ShellOutcome::Exited { code } => format!("exit code: {code}"),
         ShellOutcome::Signaled { signal } => format!("killed by signal {signal}"),
+        ShellOutcome::Cancelled => "stopped because the session ended or the computer is shutting down, the command and everything it started were killed".to_owned(),
         ShellOutcome::TimedOut { after_secs } => format!(
             "timed out after {after_secs} s and was killed together with everything it started, the output below is what it printed before that"
         ),
@@ -25,7 +26,10 @@ fn stream(text: &str) -> &str {
 /// A command that ran is a normal result, even when it failed. A timeout is flagged as an error.
 pub fn tool_result(reply: &ShellReply) -> CallToolResult {
     let content = vec![ContentBlock::text(describe(reply))];
-    if matches!(reply.outcome, ShellOutcome::TimedOut { .. }) {
+    if matches!(
+        reply.outcome,
+        ShellOutcome::TimedOut { .. } | ShellOutcome::Cancelled
+    ) {
         CallToolResult::error(content)
     } else {
         CallToolResult::success(content)
