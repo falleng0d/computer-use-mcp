@@ -2,9 +2,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use computer_protocol::{
-    ActReply, ActRequest, ApiError, CreateSession, Health, Observation, PROTOCOL_VERSION,
-    ScreenSize, SessionCreated, SessionId, SessionTitle, SetCwdReply, SetCwdRequest, ShellReply,
-    ShellRequest, ShellTimeouts, VERSION,
+    ActReply, ActRequest, ApiError, CreateSession, Health, ListFilesReply, ListFilesRequest,
+    Observation, PROTOCOL_VERSION, ReadFileReply, ReadFileRequest, ScreenSize, SessionCreated,
+    SessionId, SessionTitle, SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts,
+    VERSION, WriteFileReply, WriteFileRequest,
 };
 use reqwest::StatusCode;
 
@@ -16,6 +17,7 @@ const OBSERVE_TIMEOUT: Duration = Duration::from_secs(40);
 const ACT_MARGIN: Duration = Duration::from_secs(120);
 /// Time on top of a command's own timeout for killing it and for the HTTP round trip.
 const SHELL_MARGIN: Duration = Duration::from_secs(30);
+const FILE_TIMEOUT: Duration = Duration::from_secs(60);
 const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const HEALTH_DEADLINE: Duration = Duration::from_secs(60);
 const HEALTH_RETRY: Duration = Duration::from_millis(250);
@@ -221,6 +223,61 @@ impl Client {
             .await
             .context("asking the computer to change folder")?;
         read_reply(response, "reading the new working folder").await
+    }
+
+    /// Lists a folder, the session's working folder when `path` is `None`.
+    ///
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub async fn list_files(
+        &self,
+        session: &SessionId,
+        request: &ListFilesRequest,
+    ) -> Result<ListFilesReply> {
+        self.file_call(session, "list", request, "listing the folder")
+            .await
+    }
+
+    /// Reads a text file or an image.
+    ///
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub async fn read_file(
+        &self,
+        session: &SessionId,
+        request: &ReadFileRequest,
+    ) -> Result<ReadFileReply> {
+        self.file_call(session, "read", request, "reading the file")
+            .await
+    }
+
+    /// Writes a text file.
+    ///
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub async fn write_file(
+        &self,
+        session: &SessionId,
+        request: &WriteFileRequest,
+    ) -> Result<WriteFileReply> {
+        self.file_call(session, "write", request, "writing the file")
+            .await
+    }
+
+    async fn file_call<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        session: &SessionId,
+        verb: &str,
+        body: &B,
+        what: &'static str,
+    ) -> Result<T> {
+        let response = self
+            .http
+            .post(format!("{}/sessions/{session}/files/{verb}", self.base))
+            .bearer_auth(&self.token)
+            .timeout(FILE_TIMEOUT)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("sending the request to the computer for {what}"))?;
+        read_reply(response, what).await
     }
 }
 

@@ -2,7 +2,7 @@
 
 An MCP server that gives AI agents a computer. Any MCP client, such as Claude Code or OpenCode, can see and control one shared Linux desktop that runs in Docker. You can watch and use the same desktop through VNC.
 
-> **Status:** early. The MCP server starts the computer and hands out sessions (`start_computer`, `end_session`), shows each session its own screen (`computer_observe`), and lets it click, type, and scroll (`computer_act`), and runs shell commands (`shell`, `set_cwd`). The file tools are not built yet.
+> **Status:** early. The MCP server starts the computer and hands out sessions (`start_computer`, `end_session`), shows each session its own screen (`computer_observe`), and lets it click, type, and scroll (`computer_act`), runs shell commands (`shell`, `set_cwd`), and lists, reads, and writes files (`list_files`, `read_file`, `write_file`).
 
 ## Design
 
@@ -50,6 +50,8 @@ The server makes no Docker calls until an agent calls `start_computer`. That too
 `shell` takes the session id, a command, and an optional `timeout` in seconds. It runs `bash -lc` as the user `computer` inside the computer, in the session's working folder (home until `set_cwd` changes it), with no input. `DISPLAY` points at the session's screen when it has one. The result gives the exit code, the duration, and stdout and stderr separately. A failing command is a normal result. A command that runs past its timeout is killed with everything it started, and the result says so and keeps the output printed until then. Each stream keeps its first and last 15000 bytes with a `[... N bytes omitted ...]` marker between them. The call returns when the command exits, so start long-running jobs in the background with their output redirected, for example `setsid nohup server >log 2>&1 &`. Shell calls never wait for desktop actions, and one session may run several at once.
 
 `set_cwd` takes the session id and a path, resolves a relative path from the current working folder (`~` is home), and fails when the folder does not exist. It returns the new absolute path.
+
+`list_files`, `read_file`, and `write_file` take the session id and a path. Relative paths start at the session's working folder, `~` is home, and absolute paths work anywhere the user `computer` can reach. All sessions see the same files. `list_files` lists one folder (the working folder by default), folders first, with type, size, and modified time, and caps at 1000 entries. `read_file` returns UTF-8 text as text and PNG or JPEG files (up to 1 MB, found by their first bytes) as images. It refuses other binary files with a hint to use `shell`. Long text keeps its first and last 15000 bytes with a marker between them and a note, and the optional `offset` and `limit` (in lines, from 1) read a range. `write_file` replaces a file with UTF-8 content of up to 10 MB, creates missing folders, and writes atomically while keeping an existing file's permissions. It refuses a path that is a folder.
 
 ## Development
 

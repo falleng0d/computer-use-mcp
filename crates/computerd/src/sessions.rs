@@ -6,14 +6,15 @@ use std::{
 };
 
 use computer_protocol::{
-    ActReply, ActRequest, Observation, ScreenSize, SessionId, SessionTitle, SetCwdReply,
-    SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts,
+    ActReply, ActRequest, ListFilesReply, ListFilesRequest, Observation, ReadFileReply,
+    ReadFileRequest, ScreenSize, SessionId, SessionTitle, SetCwdReply, SetCwdRequest, ShellReply,
+    ShellRequest, ShellTimeouts, WriteFileReply, WriteFileRequest,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::{
-    exec,
+    exec, files,
     screen::{Numbers, Screen, ScreenError},
     workdir,
 };
@@ -234,6 +235,39 @@ impl Sessions {
         })
     }
 
+    /// Lists a folder. A relative path starts at the session's working folder.
+    pub async fn list_files(
+        &self,
+        id: &SessionId,
+        request: ListFilesRequest,
+    ) -> Result<ListFilesReply, SessionError> {
+        let cwd = self.cwd(id)?;
+        let home = self.home.clone();
+        blocking(move || files::list(&cwd, &home, &request)).await
+    }
+
+    /// Reads a text file or an image. A relative path starts at the session's working folder.
+    pub async fn read_file(
+        &self,
+        id: &SessionId,
+        request: ReadFileRequest,
+    ) -> Result<ReadFileReply, SessionError> {
+        let cwd = self.cwd(id)?;
+        let home = self.home.clone();
+        blocking(move || files::read(&cwd, &home, &request)).await
+    }
+
+    /// Writes a text file. A relative path starts at the session's working folder.
+    pub async fn write_file(
+        &self,
+        id: &SessionId,
+        request: WriteFileRequest,
+    ) -> Result<WriteFileReply, SessionError> {
+        let cwd = self.cwd(id)?;
+        let home = self.home.clone();
+        blocking(move || files::write(&cwd, &home, &request)).await
+    }
+
     /// The session's working folder, the base of relative paths.
     pub fn cwd(&self, id: &SessionId) -> Result<PathBuf, SessionError> {
         Ok(lock(&self.get(id)?.cwd).clone())
@@ -259,5 +293,17 @@ impl Sessions {
                 );
             }
         }
+    }
+}
+
+/// Runs blocking file work off the async threads. A refusal becomes a message for the agent.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, SessionError> {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result.map_err(SessionError::Rejected),
+        Err(error) => Err(SessionError::Failed(
+            anyhow::Error::new(error).context("running the file call"),
+        )),
     }
 }

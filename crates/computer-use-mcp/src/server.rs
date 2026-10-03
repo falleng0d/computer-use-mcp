@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use computer_protocol::{
-    ActRequest, DEFAULT_SHELL_TIMEOUT_MAX_SECS, DEFAULT_SHELL_TIMEOUT_SECS, RawAction, ScreenSize,
-    SessionId, SessionTitle, ShellRequest, ShellTimeouts,
+    ActRequest, DEFAULT_SHELL_TIMEOUT_MAX_SECS, DEFAULT_SHELL_TIMEOUT_SECS, ListFilesRequest,
+    RawAction, ReadFileRequest, ScreenSize, SessionId, SessionTitle, ShellRequest, ShellTimeouts,
+    WriteFileRequest,
 };
 use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, schemars, tool, tool_handler,
@@ -16,6 +17,7 @@ use tracing::error;
 use crate::{
     client::{Client, UnknownSession},
     computer::{Docked, Settings},
+    file_result,
     image::{self, Image},
     observation, shell_result,
 };
@@ -81,6 +83,36 @@ pub struct SetCwdArgs {
     session: String,
     /// Folder that becomes your working folder. A relative path starts at the current one, `~` is home.
     path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListFilesArgs {
+    /// Session id returned by `start_computer`.
+    session: String,
+    /// Folder to list. A relative path starts at your working folder, `~` is home. Defaults to your working folder.
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReadFileArgs {
+    /// Session id returned by `start_computer`.
+    session: String,
+    /// File to read. A relative path starts at your working folder, `~` is home.
+    path: String,
+    /// First line to return, counting from 1. Text files only. Default 1.
+    offset: Option<u64>,
+    /// Number of lines to return. Text files only. Default: as many as fit.
+    limit: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WriteFileArgs {
+    /// Session id returned by `start_computer`.
+    session: String,
+    /// File to write. A relative path starts at your working folder, `~` is home. Missing folders are created.
+    path: String,
+    /// UTF-8 text that becomes the whole content of the file, up to 10 MB.
+    content: String,
 }
 
 /// Seconds from an environment value, `None` when unset or empty.
@@ -234,6 +266,40 @@ impl Server {
         }
     }
 
+    async fn files_list(&self, args: ListFilesArgs) -> anyhow::Result<String> {
+        let (session, client) = self.client_for(&args.session).await?;
+        let request = ListFilesRequest { path: args.path };
+        match client.list_files(&session, &request).await {
+            Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
+            other => other.map(|reply| file_result::describe_list(&reply)),
+        }
+    }
+
+    async fn files_read(&self, args: ReadFileArgs) -> anyhow::Result<CallToolResult> {
+        let (session, client) = self.client_for(&args.session).await?;
+        let request = ReadFileRequest {
+            path: args.path,
+            offset: args.offset,
+            limit: args.limit,
+        };
+        match client.read_file(&session, &request).await {
+            Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
+            other => other.map(file_result::read_result),
+        }
+    }
+
+    async fn files_write(&self, args: WriteFileArgs) -> anyhow::Result<String> {
+        let (session, client) = self.client_for(&args.session).await?;
+        let request = WriteFileRequest {
+            path: args.path,
+            content: args.content,
+        };
+        match client.write_file(&session, &request).await {
+            Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
+            other => other.map(|reply| file_result::describe_write(&reply)),
+        }
+    }
+
     async fn end(&self, session: &str) -> anyhow::Result<()> {
         let (session, client) = self.client_for(session).await?;
         match client.end_session(&session).await {
@@ -333,6 +399,43 @@ impl Server {
     async fn set_cwd(&self, Parameters(args): Parameters<SetCwdArgs>) -> Result<String, String> {
         let result = self.change_cwd(args).await;
         report("set_cwd", result)
+    }
+
+    #[tool(
+        description = "List the files and folders in one folder of the computer, without going into subfolders. Defaults to your working folder. Relative paths start at your working folder, `~` is home, absolute paths work anywhere the user `computer` can read. Returns the absolute path, then one line per entry with its type (folder, file, symlink), size in bytes, modified time, and name, folders first. Shows up to 1000 entries and says how many were left out. All sessions see the same files."
+    )]
+    async fn list_files(
+        &self,
+        Parameters(args): Parameters<ListFilesArgs>,
+    ) -> Result<String, String> {
+        let result = self.files_list(args).await;
+        report("list_files", result)
+    }
+
+    #[tool(
+        description = "Read a file on the computer. UTF-8 text comes back as text. PNG and JPEG files come back as images (up to 1 MB), so you can look at screenshots and pictures. Other binary files are refused, inspect them with the shell tool. Relative paths start at your working folder, `~` is home. Long text keeps its start and end with a marker in between and a note on how to read the rest. Use offset and limit, counted in lines from 1, to read a range."
+    )]
+    async fn read_file(
+        &self,
+        Parameters(args): Parameters<ReadFileArgs>,
+    ) -> Result<CallToolResult, String> {
+        let result = self.files_read(args).await;
+        result.map_err(|error| {
+            let message = format!("{error:#}");
+            error!(tool = "read_file", error = %message, "tool call failed");
+            message
+        })
+    }
+
+    #[tool(
+        description = "Write a UTF-8 text file on the computer as the user `computer`, replacing the file if it exists. Missing folders are created. The write is atomic, so nobody reads half a file, and an existing file keeps its permissions. Relative paths start at your working folder, `~` is home. Content is limited to 10 MB. Returns the absolute path and the bytes written. All sessions see the same files."
+    )]
+    async fn write_file(
+        &self,
+        Parameters(args): Parameters<WriteFileArgs>,
+    ) -> Result<String, String> {
+        let result = self.files_write(args).await;
+        report("write_file", result)
     }
 }
 
@@ -712,6 +815,99 @@ none
         );
 
         server.end(session.as_str()).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Docker"]
+    async fn files_are_shared_between_sessions_and_a_shell_made_png_reads_back_as_an_image() {
+        let name = format!("computer-use-test-{}", Uuid::new_v4().simple());
+        let settings = Settings {
+            name: name.clone(),
+            timezone: None,
+        };
+        let docker = Docker::connect_with_defaults().unwrap();
+        let _cleanup = Cleanup {
+            docker,
+            name,
+            volume: settings.volume(),
+        };
+        let server = Server::new(
+            settings,
+            image::from_env(),
+            Ok(ScreenSize::default()),
+            Ok(ShellTimeouts::default()),
+        );
+        let writer = server.start("writer").await.unwrap();
+        let reader = server.start("reader").await.unwrap();
+        let write = |session: &SessionId, path: &str, content: &str| {
+            let args = serde_json::from_value(serde_json::json!({
+                "session": session.as_str(), "path": path, "content": content,
+            }))
+            .unwrap();
+            server.files_write(args)
+        };
+        let read = |session: &SessionId, path: &str| {
+            let args = serde_json::from_value(
+                serde_json::json!({ "session": session.as_str(), "path": path }),
+            )
+            .unwrap();
+            server.files_read(args)
+        };
+
+        let written = write(&writer, "~/deep/er/note.txt", "h\u{e9}llo\n")
+            .await
+            .unwrap();
+        assert_eq!(written, "wrote 7 bytes to /home/computer/deep/er/note.txt");
+        let seen = read(&reader, "/home/computer/deep/er/note.txt")
+            .await
+            .unwrap();
+        assert_eq!(text_of(&seen), "h\u{e9}llo\n");
+
+        server
+            .change_cwd(
+                serde_json::from_value(
+                    serde_json::json!({ "session": writer.as_str(), "path": "deep" }),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let relative = read(&writer, "er/note.txt").await.unwrap();
+        assert_eq!(text_of(&relative), "h\u{e9}llo\n");
+        let elsewhere = read(&reader, "er/note.txt").await.unwrap_err();
+        assert!(
+            elsewhere.to_string().contains("does not exist"),
+            "{elsewhere}"
+        );
+
+        let listing = server
+            .files_list(
+                serde_json::from_value(
+                    serde_json::json!({ "session": writer.as_str(), "path": "er" }),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            listing.starts_with("/home/computer/deep/er\n1 entries"),
+            "{listing}"
+        );
+
+        let make = "printf '\\211PNG\\r\\n\\032\\n' > /tmp/t.png; head -c 100 /dev/urandom >> /tmp/t.png; printf '\\000\\001' > /tmp/t.bin";
+        let shell = server
+            .run_shell(shell_args(&writer, make, None))
+            .await
+            .unwrap();
+        assert!(text_of(&shell).starts_with("exit code: 0"));
+        let image = serde_json::to_value(read(&reader, "/tmp/t.png").await.unwrap()).unwrap();
+        assert_eq!(image["content"][1]["type"], "image");
+        assert_eq!(image["content"][1]["mimeType"], "image/png");
+        let binary = read(&reader, "/tmp/t.bin").await.unwrap_err();
+        assert!(binary.to_string().contains("shell tool"), "{binary}");
+
+        server.end(writer.as_str()).await.unwrap();
+        server.end(reader.as_str()).await.unwrap();
     }
 
     #[test]

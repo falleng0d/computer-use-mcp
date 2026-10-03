@@ -1,10 +1,15 @@
 use serde::{Deserialize, Serialize};
 
 pub mod act;
+mod files;
 mod shell;
 
 pub use act::{
     ActReply, ActRequest, Action, ActionError, Button, Direction, Kind, Point, RawAction,
+};
+pub use files::{
+    FileEntry, FileKind, ImageType, ListFilesReply, ListFilesRequest, MAX_IMAGE_BYTES,
+    MAX_WRITE_BYTES, ReadFileReply, ReadFileRequest, WriteFileReply, WriteFileRequest,
 };
 pub use shell::{
     DEFAULT_SHELL_TIMEOUT_MAX_SECS, DEFAULT_SHELL_TIMEOUT_SECS, LONGEST_SHELL_TIMEOUT_SECS,
@@ -13,7 +18,7 @@ pub use shell::{
 };
 
 /// Version of the wire format between the host and `computerd`.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 pub const RELEASE_VERSION: Option<&str> = match option_env!("COMPUTER_USE_MCP_VERSION") {
     Some(version) if !version.is_empty() => Some(version),

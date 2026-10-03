@@ -1,5 +1,6 @@
 mod client;
 mod computer;
+mod file_result;
 mod image;
 mod observation;
 mod server;

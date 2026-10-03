@@ -2,15 +2,17 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, Request, State},
+    extract::{DefaultBodyLimit, Path, Request, State},
     http::{StatusCode, header::AUTHORIZATION},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use computer_protocol::{
-    ActReply, ActRequest, ApiError, CreateSession, Health, Observation, PROTOCOL_VERSION,
-    SessionCreated, SessionId, SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, VERSION,
+    ActReply, ActRequest, ApiError, CreateSession, Health, ListFilesReply, ListFilesRequest,
+    Observation, PROTOCOL_VERSION, ReadFileReply, ReadFileRequest, SessionCreated, SessionId,
+    SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, VERSION, WriteFileReply,
+    WriteFileRequest,
 };
 use tracing::error;
 use uuid::Uuid;
@@ -18,6 +20,8 @@ use uuid::Uuid;
 use crate::sessions::{SessionError, Sessions};
 
 const BEARER_PREFIX: &str = "Bearer ";
+/// Room for a 10 MB file whose every byte JSON escapes to 6 bytes.
+const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 struct AppState {
@@ -38,6 +42,10 @@ pub fn router(token: String, sessions: Sessions) -> Router {
         .route("/sessions/{id}/act", post(act))
         .route("/sessions/{id}/shell", post(shell))
         .route("/sessions/{id}/cwd", post(set_cwd))
+        .route("/sessions/{id}/files/list", post(list_files))
+        .route("/sessions/{id}/files/read", post(read_file))
+        .route("/sessions/{id}/files/write", post(write_file))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state)
 }
@@ -120,6 +128,30 @@ async fn set_cwd(
     Json(request): Json<SetCwdRequest>,
 ) -> Result<Json<SetCwdReply>, SessionError> {
     state.sessions.set_cwd(&id, request).await.map(Json)
+}
+
+async fn list_files(
+    State(state): State<AppState>,
+    Path(id): Path<SessionId>,
+    Json(request): Json<ListFilesRequest>,
+) -> Result<Json<ListFilesReply>, SessionError> {
+    state.sessions.list_files(&id, request).await.map(Json)
+}
+
+async fn read_file(
+    State(state): State<AppState>,
+    Path(id): Path<SessionId>,
+    Json(request): Json<ReadFileRequest>,
+) -> Result<Json<ReadFileReply>, SessionError> {
+    state.sessions.read_file(&id, request).await.map(Json)
+}
+
+async fn write_file(
+    State(state): State<AppState>,
+    Path(id): Path<SessionId>,
+    Json(request): Json<WriteFileRequest>,
+) -> Result<Json<WriteFileReply>, SessionError> {
+    state.sessions.write_file(&id, request).await.map(Json)
 }
 
 impl IntoResponse for SessionError {
