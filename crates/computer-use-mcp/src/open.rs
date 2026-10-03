@@ -19,6 +19,9 @@ use crate::{client::Client, computer::Endpoint};
 pub const OPEN_ENV: &str = "COMPUTER_USE_OPEN";
 pub const VNC_VIEWER_ENV: &str = "COMPUTER_USE_VNC_VIEWER";
 const VIEWER_PROGRAM: &str = "vncviewer.exe";
+const PASSWD_FILE_PREFIX: &str = "computer-use-";
+const PASSWD_FILE_SUFFIX: &str = ".vncpasswd";
+const STALE_AFTER: Duration = Duration::from_secs(60);
 const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long after opening a tab the next screens are shown there instead of opening another tab.
@@ -158,7 +161,7 @@ fn viewer_candidates(
         .collect()
 }
 
-/// The viewer program, or `None`. A program in the setting is used as given.
+/// The viewer program, or `None`. A setting is used only when it names a file.
 fn find_viewer() -> Option<PathBuf> {
     let setting = std::env::var(VNC_VIEWER_ENV).ok();
     let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
@@ -170,13 +173,44 @@ fn find_viewer() -> Option<PathBuf> {
         .map(PathBuf::from)
         .collect();
     let candidates = viewer_candidates(setting.as_deref(), &path_dirs, &program_dirs);
-    if setting
-        .as_deref()
-        .is_some_and(|text| !text.trim().is_empty())
-    {
-        return candidates.into_iter().next();
+    if let Some(set) = setting.as_deref().filter(|text| !text.trim().is_empty()) {
+        let path = candidates.into_iter().next()?;
+        if path.is_file() {
+            return Some(path);
+        }
+        warn!(
+            setting = VNC_VIEWER_ENV,
+            value = set,
+            "the setting is not a file"
+        );
+        return None;
     }
     candidates.into_iter().find(|path| path.is_file())
+}
+
+fn is_password_file(name: &str) -> bool {
+    name.starts_with(PASSWD_FILE_PREFIX) && name.ends_with(PASSWD_FILE_SUFFIX)
+}
+
+/// Removes password files that an earlier server left in the temp folder, such as after a crash.
+pub fn remove_stale_password_files() {
+    remove_stale_in(&std::env::temp_dir(), STALE_AFTER);
+}
+
+fn remove_stale_in(dir: &Path, older_than: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age > older_than));
+        if old && name.to_str().is_some_and(is_password_file) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 struct Shared {
@@ -393,7 +427,7 @@ fn start(program: &OsString, args: &[OsString]) -> Result<()> {
 /// Writes the VNC password file in the temp folder, readable by this user only.
 async fn write_password_file(shared: &Shared, key: &str) -> Result<PathBuf> {
     let path = std::env::temp_dir().join(format!(
-        "computer-use-{}.vncpasswd",
+        "{PASSWD_FILE_PREFIX}{}{PASSWD_FILE_SUFFIX}",
         Uuid::new_v4().simple()
     ));
     let bytes = vnc_password_file(key);
@@ -517,5 +551,26 @@ mod tests {
             viewer_candidates(Some(" "), &[], &[]),
             Vec::<PathBuf>::new()
         );
+    }
+
+    #[test]
+    fn only_old_password_files_are_removed_from_the_temp_folder() {
+        let dir = std::env::temp_dir().join(format!("open-test-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir(&dir).unwrap();
+        let make = |name: &str, age: Duration| {
+            let path = dir.join(name);
+            let file = std::fs::File::create(&path).unwrap();
+            file.set_modified(std::time::SystemTime::now() - age)
+                .unwrap();
+            path
+        };
+        let old = make("computer-use-a.vncpasswd", Duration::from_secs(300));
+        let new = make("computer-use-b.vncpasswd", Duration::ZERO);
+        let other = make("computer-use-c.txt", Duration::from_secs(300));
+        remove_stale_in(&dir, Duration::from_secs(60));
+        assert!(!old.exists());
+        assert!(new.exists());
+        assert!(other.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

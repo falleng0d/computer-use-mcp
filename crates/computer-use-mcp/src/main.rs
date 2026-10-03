@@ -69,6 +69,7 @@ async fn serve() -> anyhow::Result<()> {
         .with_ansi(false)
         .init();
     tracing::info!(version = computer_protocol::VERSION, "MCP server starting");
+    let _ = tokio::task::spawn_blocking(open::remove_stale_password_files).await;
     let server = server::Server::from_env();
     let running = server
         .clone()

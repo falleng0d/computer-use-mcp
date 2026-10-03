@@ -797,6 +797,93 @@ mod tests {
         );
     }
 
+    fn fresh_server() -> (Server, Cleanup) {
+        let name = format!("computer-use-test-{}", Uuid::new_v4().simple());
+        let settings = Settings {
+            name: name.clone(),
+            timezone: None,
+            port_base: Ok(crate::computer::free_port_base()),
+        };
+        let docker = Docker::connect_with_defaults().unwrap();
+        let cleanup = Cleanup {
+            docker,
+            name,
+            volume: settings.volume(),
+        };
+        let server = Server::new(
+            settings,
+            image::from_env(),
+            Ok(ScreenSize::default()),
+            Ok(ShellTimeouts::default()),
+            parse_idle(None),
+            Ok(open::Mode::None),
+        );
+        (server, cleanup)
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Docker"]
+    async fn four_first_calls_at_once_on_a_fresh_computer_all_open_a_screen() {
+        let (server, _cleanup) = fresh_server();
+        let mut sessions = Vec::new();
+        for title in ["a", "b", "c", "d"] {
+            sessions.push(server.start(title).await.unwrap().session);
+        }
+        let results = futures_util::future::join_all(
+            sessions
+                .iter()
+                .map(|session| server.observe(session.as_str())),
+        )
+        .await;
+        for result in results {
+            result.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Docker"]
+    async fn a_screen_opened_by_a_rejected_call_is_reported_by_the_next_reply() {
+        let (server, _cleanup) = fresh_server();
+        let session = server.start("rejected first").await.unwrap().session;
+        let (_, endpoint) = server.endpoint_for(session.as_str()).await.unwrap();
+        let client = Client::new(&endpoint).unwrap();
+        let act = |action: serde_json::Value| {
+            ActRequest::parse(
+                &[serde_json::from_value(action).unwrap()],
+                Some(false),
+                None,
+            )
+            .unwrap()
+        };
+        let refused = client
+            .act(
+                &session,
+                &act(serde_json::json!({"kind": "key", "key": "nosuchkey"})),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("unknown key"),
+            "{refused:#}"
+        );
+        let reply = client
+            .act(
+                &session,
+                &act(serde_json::json!({"kind": "wait", "ms": 10})),
+            )
+            .await
+            .unwrap();
+        assert!(reply.opened_screen.is_some());
+        let again = client
+            .act(
+                &session,
+                &act(serde_json::json!({"kind": "wait", "ms": 10})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(again.opened_screen, None);
+    }
+
     #[tokio::test]
     #[ignore = "needs Docker"]
     async fn observing_shows_a_screen_then_omits_the_unchanged_frame() {

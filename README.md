@@ -84,7 +84,7 @@ The viewer opens by itself the first time a session's screen opens, so the user 
 
 - `browser` (default). If a viewer page is already open in a browser, it switches to the new screen and highlights it in the sidebar, and no tab opens. Otherwise a tab opens on the new screen. Several screens opening at once open one tab. The page count is a best guess. If no page is really there, the viewer link from `start_computer` still works.
 - `vnc` on macOS runs `open vnc://:<key>@127.0.0.1:<port>`, which opens Screen Sharing.
-- `vnc` on Windows runs a VNC viewer directly, because Windows viewers do not read a password from a `vnc://` link. It needs [TigerVNC](https://tigervnc.org). The server uses `COMPUTER_USE_VNC_VIEWER` (the path of `vncviewer.exe`, run as `vncviewer.exe -passwd <file> 127.0.0.1::<port>`), or else `vncviewer.exe` from `PATH` or from `Program Files\TigerVNC`. The password goes into a private temp file that is removed after 15 s or when the server exits. With no viewer found, the server opens the browser and logs the reason to stderr.
+- `vnc` on Windows runs a VNC viewer directly, because Windows viewers do not read a password from a `vnc://` link. It needs [TigerVNC](https://tigervnc.org). The server uses `COMPUTER_USE_VNC_VIEWER` (the path of `vncviewer.exe`, run as `vncviewer.exe -passwd <file> 127.0.0.1::<port>`), (it must be a file), or else `vncviewer.exe` from `PATH` or from `Program Files\TigerVNC`. The password goes into a private temp file that is removed after 15 s or when the server exits. With no viewer found, the server opens the browser and logs the reason to stderr.
 - `none` opens nothing.
 
 Opening never delays or fails a tool call. Problems go to stderr. `vnc` on Linux hosts opens the browser.

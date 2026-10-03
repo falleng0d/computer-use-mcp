@@ -87,6 +87,8 @@ struct Session {
     cwd: Mutex<PathBuf>,
     /// Display number of the open screen. Shell calls read it without touching the screen lock.
     display: Mutex<Option<u8>>,
+    /// Screen opened by a call that has not yet returned successfully. The next successful reply reports it once.
+    announce: Mutex<Option<u8>>,
     /// Holds the session's screen. Desktop actions lock it, so they run one at a time.
     screen: Arc<tokio::sync::Mutex<Slot>>,
 }
@@ -250,6 +252,7 @@ impl Sessions {
             cancel: self.shutdown.child_token(),
             cwd: Mutex::new(self.home.clone()),
             display: Mutex::new(None),
+            announce: Mutex::new(None),
             screen: Arc::new(tokio::sync::Mutex::new(Slot::Unopened)),
         };
         self.lock().insert(id, Arc::new(session));
@@ -437,7 +440,7 @@ impl Sessions {
     }
 
     /// Runs `call` on the session's screen while holding the session's screen lock.
-    /// Also returns the screen number when this call opened the screen.
+    /// Also returns the screen number when the screen opened and no successful reply has reported it yet.
     ///
     /// A screen that fails the call and is found dead, or that exceeds `timeout`, is closed.
     async fn with_screen<T>(
@@ -452,7 +455,6 @@ impl Sessions {
         if matches!(*slot, Slot::Closed) || session.cancel.is_cancelled() {
             return Err(self.missing(id));
         }
-        let mut opened = None;
         if matches!(*slot, Slot::Unopened) {
             let lease = self.numbers.lease().ok_or(SessionError::NoFreeScreen)?;
             let screen = Screen::open(lease, session.screen_size)
@@ -468,7 +470,7 @@ impl Sessions {
             );
             self.hub.reopen_screen(screen.number());
             self.hub.notify();
-            opened = Some(screen.number());
+            *lock(&session.announce) = Some(screen.number());
             *slot = Slot::Open(Box::new(screen));
         }
         let Slot::Open(screen) = &mut *slot else {
@@ -479,7 +481,7 @@ impl Sessions {
             () = session.cancel.cancelled() => return Err(self.missing(id)),
         };
         let failure = match outcome {
-            Ok(Ok(value)) => return Ok((value, opened)),
+            Ok(Ok(value)) => return Ok((value, lock(&session.announce).take())),
             Ok(Err(ScreenError::Rejected(message))) => return Err(SessionError::Rejected(message)),
             Ok(Err(ScreenError::Failed(error))) => match screen.check_alive() {
                 Ok(()) => return Err(SessionError::Failed(error)),
@@ -489,6 +491,7 @@ impl Sessions {
         };
         warn!(session = %id, error = %format!("{failure:#}"), "closing a broken screen");
         *lock(&session.display) = None;
+        *lock(&session.announce) = None;
         self.hub.notify();
         *slot = match std::mem::replace(&mut *slot, Slot::Unopened) {
             Slot::Open(screen) => {
