@@ -257,16 +257,30 @@ fn explain_start_error(error: anyhow::Error, creating: bool) -> anyhow::Error {
     }
 }
 
-/// A free host port block of 17 ports for tests that create computers, so parallel tests never collide.
+/// A free host port block of 17 ports for tests that create computers.
+///
+/// Blocks sit below the Windows ephemeral range (49152 and up), where outgoing connections take
+/// ports. Each block is handed out once per process, so parallel tests never collide.
 #[cfg(test)]
 pub fn free_port_base() -> u16 {
-    use std::net::TcpListener;
-    let start = 30000 + (Uuid::new_v4().as_u128() % 1500) as u16 * 20;
-    (0..1500)
-        .map(|step| 30000 + (start - 30000 + step * 20) % 30000)
+    use std::{collections::HashSet, net::TcpListener, sync::Mutex};
+    const FIRST: u16 = 30000;
+    const BLOCK: u16 = 17;
+    const BLOCKS: u16 = (48000 - FIRST) / BLOCK;
+    static TAKEN: Mutex<Option<HashSet<u16>>> = Mutex::new(None);
+
+    let mut taken = TAKEN.lock().expect("the port block lock is held briefly");
+    let taken = taken.get_or_insert_with(HashSet::new);
+    let start = u16::try_from(Uuid::new_v4().as_u128() % u128::from(BLOCKS))
+        .expect("the remainder is below the block count");
+    (0..BLOCKS)
+        .map(|step| FIRST + (start + step) % BLOCKS * BLOCK)
         .find(|base| {
-            (0..=SCREEN_COUNT)
-                .all(|offset| TcpListener::bind(("127.0.0.1", base + u16::from(offset))).is_ok())
+            !taken.contains(base)
+                && (0..BLOCK).all(|offset| TcpListener::bind(("127.0.0.1", base + offset)).is_ok())
+        })
+        .inspect(|base| {
+            taken.insert(*base);
         })
         .expect("a free block of ports exists")
 }
