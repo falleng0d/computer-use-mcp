@@ -10,7 +10,7 @@ use axum::{
 };
 use computer_protocol::{
     ActReply, ActRequest, ApiError, CreateSession, Health, Observation, PROTOCOL_VERSION,
-    SessionCreated, SessionId, VERSION,
+    SessionCreated, SessionId, SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, VERSION,
 };
 use tracing::error;
 use uuid::Uuid;
@@ -36,6 +36,8 @@ pub fn router(token: String, sessions: Sessions) -> Router {
         .route("/sessions/{id}", delete(end_session))
         .route("/sessions/{id}/observe", post(observe))
         .route("/sessions/{id}/act", post(act))
+        .route("/sessions/{id}/shell", post(shell))
+        .route("/sessions/{id}/cwd", post(set_cwd))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state)
 }
@@ -72,9 +74,12 @@ async fn create_session(
 ) -> (StatusCode, Json<SessionCreated>) {
     let id = SessionId::parse(&Uuid::new_v4().simple().to_string())
         .expect("a simple UUID is 32 lowercase hex digits");
-    state
-        .sessions
-        .insert(id.clone(), request.title, request.screen_size);
+    state.sessions.insert(
+        id.clone(),
+        request.title,
+        request.screen_size,
+        request.shell_timeouts,
+    );
     (StatusCode::CREATED, Json(SessionCreated { session: id }))
 }
 
@@ -99,6 +104,22 @@ async fn act(
     Json(request): Json<ActRequest>,
 ) -> Result<Json<ActReply>, SessionError> {
     state.sessions.act(&id, request).await.map(Json)
+}
+
+async fn shell(
+    State(state): State<AppState>,
+    Path(id): Path<SessionId>,
+    Json(request): Json<ShellRequest>,
+) -> Result<Json<ShellReply>, SessionError> {
+    state.sessions.shell(&id, request).await.map(Json)
+}
+
+async fn set_cwd(
+    State(state): State<AppState>,
+    Path(id): Path<SessionId>,
+    Json(request): Json<SetCwdRequest>,
+) -> Result<Json<SetCwdReply>, SessionError> {
+    state.sessions.set_cwd(&id, request).await.map(Json)
 }
 
 impl IntoResponse for SessionError {
@@ -169,7 +190,7 @@ mod tests {
             "POST",
             "/sessions",
             Some(TOKEN),
-            r#"{"title":"fix the build","screen_size":"1280x800"}"#,
+            r#"{"title":"fix the build","screen_size":"1280x800","shell_timeouts":{"default_secs":120,"max_secs":600}}"#,
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
@@ -199,7 +220,7 @@ mod tests {
             "POST",
             "/sessions",
             Some(TOKEN),
-            r#"{"title":"  ","screen_size":"1280x800"}"#,
+            r#"{"title":"  ","screen_size":"1280x800","shell_timeouts":{"default_secs":120,"max_secs":600}}"#,
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);

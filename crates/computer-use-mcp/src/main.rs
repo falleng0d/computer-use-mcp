@@ -3,6 +3,7 @@ mod computer;
 mod image;
 mod observation;
 mod server;
+mod shell_result;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};

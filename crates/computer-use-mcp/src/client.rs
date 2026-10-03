@@ -3,7 +3,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use computer_protocol::{
     ActReply, ActRequest, ApiError, CreateSession, Health, Observation, PROTOCOL_VERSION,
-    ScreenSize, SessionCreated, SessionId, SessionTitle, VERSION,
+    ScreenSize, SessionCreated, SessionId, SessionTitle, SetCwdReply, SetCwdRequest, ShellReply,
+    ShellRequest, ShellTimeouts, VERSION,
 };
 use reqwest::StatusCode;
 
@@ -13,6 +14,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(40);
 /// Time on top of the batch's own budget for the HTTP round trip and for waiting behind another batch of the session.
 const ACT_MARGIN: Duration = Duration::from_secs(120);
+/// Time on top of a command's own timeout for killing it and for the HTTP round trip.
+const SHELL_MARGIN: Duration = Duration::from_secs(30);
 const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const HEALTH_DEADLINE: Duration = Duration::from_secs(60);
 const HEALTH_RETRY: Duration = Duration::from_millis(250);
@@ -82,12 +85,17 @@ impl Client {
         &self,
         title: SessionTitle,
         screen_size: ScreenSize,
+        shell_timeouts: ShellTimeouts,
     ) -> Result<SessionId> {
         let created: SessionCreated = self
             .http
             .post(format!("{}/sessions", self.base))
             .bearer_auth(&self.token)
-            .json(&CreateSession { title, screen_size })
+            .json(&CreateSession {
+                title,
+                screen_size,
+                shell_timeouts,
+            })
             .send()
             .await
             .context("creating the session")?
@@ -177,4 +185,59 @@ impl Client {
             .await
             .context("reading the reply to the actions")
     }
+
+    /// Runs a shell command in the session's working folder.
+    ///
+    /// `timeouts` are the session's, so the HTTP timeout outlasts the command's own.
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub async fn shell(
+        &self,
+        session: &SessionId,
+        request: &ShellRequest,
+        timeouts: ShellTimeouts,
+    ) -> Result<ShellReply> {
+        let response = self
+            .http
+            .post(format!("{}/sessions/{session}/shell", self.base))
+            .bearer_auth(&self.token)
+            .timeout(timeouts.effective(request.timeout_secs) + SHELL_MARGIN)
+            .json(request)
+            .send()
+            .await
+            .context("sending the command to the computer")?;
+        read_reply(response, "reading the result of the command").await
+    }
+
+    /// Changes the session's working folder.
+    ///
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub async fn set_cwd(&self, session: &SessionId, path: String) -> Result<SetCwdReply> {
+        let response = self
+            .http
+            .post(format!("{}/sessions/{session}/cwd", self.base))
+            .bearer_auth(&self.token)
+            .json(&SetCwdRequest { path })
+            .send()
+            .await
+            .context("asking the computer to change folder")?;
+        read_reply(response, "reading the new working folder").await
+    }
+}
+
+async fn read_reply<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    reading: &'static str,
+) -> Result<T> {
+    let status = response.status();
+    if status == StatusCode::NOT_FOUND {
+        return Err(UnknownSession.into());
+    }
+    if !status.is_success() {
+        let message = match response.json::<ApiError>().await {
+            Ok(error) => error.message,
+            Err(_) => format!("the computer answered {status}"),
+        };
+        bail!("{message}");
+    }
+    response.json().await.context(reading)
 }

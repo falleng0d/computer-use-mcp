@@ -1,4 +1,14 @@
 mod api;
+#[cfg_attr(
+    all(not(target_os = "linux"), not(test)),
+    expect(dead_code, reason = "only Linux runs commands")
+)]
+mod cap;
+#[cfg(target_os = "linux")]
+mod exec;
+#[cfg(not(target_os = "linux"))]
+#[path = "exec_unsupported.rs"]
+mod exec;
 mod frames;
 mod guard;
 #[cfg_attr(
@@ -11,6 +21,7 @@ mod screen;
 mod sessions;
 #[cfg(target_os = "linux")]
 mod shm;
+mod workdir;
 #[cfg(target_os = "linux")]
 mod x11;
 #[cfg(not(target_os = "linux"))]

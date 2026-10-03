@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use computer_protocol::{ActRequest, RawAction, ScreenSize, SessionId, SessionTitle};
+use computer_protocol::{
+    ActRequest, DEFAULT_SHELL_TIMEOUT_MAX_SECS, DEFAULT_SHELL_TIMEOUT_SECS, RawAction, ScreenSize,
+    SessionId, SessionTitle, ShellRequest, ShellTimeouts,
+};
 use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, schemars, tool, tool_handler,
     tool_router,
@@ -14,11 +17,13 @@ use crate::{
     client::{Client, UnknownSession},
     computer::{Docked, Settings},
     image::{self, Image},
-    observation,
+    observation, shell_result,
 };
 
 const START_FIRST: &str = "call start_computer first";
 const SCREEN_SIZE_ENV: &str = "COMPUTER_USE_SCREEN_SIZE";
+const SHELL_TIMEOUT_ENV: &str = "COMPUTER_USE_SHELL_TIMEOUT";
+const SHELL_TIMEOUT_MAX_ENV: &str = "COMPUTER_USE_SHELL_TIMEOUT_MAX";
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct StartComputerArgs {
@@ -60,10 +65,59 @@ fn screen_size_from_env() -> Result<ScreenSize, String> {
     }
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ShellArgs {
+    /// Session id returned by `start_computer`.
+    session: String,
+    /// Command line, run with `bash -lc` in your working folder.
+    command: String,
+    /// Seconds the command may run before it is killed. Defaults to the computer's setting, 120 s unless changed, and is capped at its maximum, 600 s unless changed.
+    timeout: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetCwdArgs {
+    /// Session id returned by `start_computer`.
+    session: String,
+    /// Folder that becomes your working folder. A relative path starts at the current one, `~` is home.
+    path: String,
+}
+
+/// Seconds from an environment value, `None` when unset or empty.
+fn parse_secs(name: &str, value: Option<&str>) -> Result<Option<u32>, String> {
+    match value.filter(|text| !text.is_empty()) {
+        None => Ok(None),
+        Some(text) => text
+            .trim()
+            .parse()
+            .map(Some)
+            .map_err(|_| format!("{name}={text}: expected a whole number of seconds")),
+    }
+}
+
+/// Builds the shell timeouts from the two settings. A default left unset follows a lower maximum.
+fn shell_timeouts_from(default: Option<&str>, max: Option<&str>) -> Result<ShellTimeouts, String> {
+    let default = parse_secs(SHELL_TIMEOUT_ENV, default)?;
+    let max = parse_secs(SHELL_TIMEOUT_MAX_ENV, max)?;
+    let max_secs = max.unwrap_or(DEFAULT_SHELL_TIMEOUT_MAX_SECS);
+    let default_secs = default.unwrap_or_else(|| DEFAULT_SHELL_TIMEOUT_SECS.min(max_secs));
+    ShellTimeouts::new(default_secs, max_secs)
+        .map_err(|error| format!("{SHELL_TIMEOUT_ENV} and {SHELL_TIMEOUT_MAX_ENV}: {error}"))
+}
+
+fn shell_timeouts_from_env() -> Result<ShellTimeouts, String> {
+    let read = |name| std::env::var(name).ok();
+    shell_timeouts_from(
+        read(SHELL_TIMEOUT_ENV).as_deref(),
+        read(SHELL_TIMEOUT_MAX_ENV).as_deref(),
+    )
+}
+
 #[derive(Clone)]
 pub struct Server {
     settings: Settings,
     screen_size: Result<ScreenSize, String>,
+    shell_timeouts: Result<ShellTimeouts, String>,
     image: Image,
     docked: Arc<OnceCell<Docked>>,
     start_lock: Arc<Mutex<()>>,
@@ -75,13 +129,20 @@ impl Server {
             Settings::from_env(),
             image::from_env(),
             screen_size_from_env(),
+            shell_timeouts_from_env(),
         )
     }
 
-    fn new(settings: Settings, image: Image, screen_size: Result<ScreenSize, String>) -> Self {
+    fn new(
+        settings: Settings,
+        image: Image,
+        screen_size: Result<ScreenSize, String>,
+        shell_timeouts: Result<ShellTimeouts, String>,
+    ) -> Self {
         Self {
             settings,
             screen_size,
+            shell_timeouts,
             image,
             docked: Arc::default(),
             start_lock: Arc::default(),
@@ -102,6 +163,7 @@ impl Server {
             .screen_size
             .clone()
             .map_err(|message| anyhow::anyhow!(message))?;
+        let shell_timeouts = self.shell_timeouts()?;
         let docked = self.docked().await?;
         let endpoint = {
             let _starting = self.start_lock.lock().await;
@@ -109,7 +171,9 @@ impl Server {
         };
         let client = Client::new(&endpoint)?;
         client.wait_until_ready(docked.name()).await?;
-        client.create_session(title, screen_size).await
+        client
+            .create_session(title, screen_size, shell_timeouts)
+            .await
     }
 
     /// Client for the running computer, or the `START_FIRST` error.
@@ -138,6 +202,35 @@ impl Server {
         match client.act(&session, &request).await {
             Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
             other => other.map(observation::act_result),
+        }
+    }
+
+    fn shell_timeouts(&self) -> anyhow::Result<ShellTimeouts> {
+        self.shell_timeouts
+            .clone()
+            .map_err(|message| anyhow::anyhow!(message))
+    }
+
+    async fn run_shell(&self, args: ShellArgs) -> anyhow::Result<CallToolResult> {
+        let (session, client) = self.client_for(&args.session).await?;
+        let request = ShellRequest {
+            command: args.command,
+            timeout_secs: args.timeout,
+        };
+        match client
+            .shell(&session, &request, self.shell_timeouts()?)
+            .await
+        {
+            Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
+            other => other.map(|reply| shell_result::tool_result(&reply)),
+        }
+    }
+
+    async fn change_cwd(&self, args: SetCwdArgs) -> anyhow::Result<String> {
+        let (session, client) = self.client_for(&args.session).await?;
+        match client.set_cwd(&session, args.path).await {
+            Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
+            other => other.map(|reply| format!("working folder: {}", reply.cwd)),
         }
     }
 
@@ -218,6 +311,29 @@ impl Server {
             message
         })
     }
+
+    #[tool(
+        description = "Run a shell command on the computer with `bash -lc`, as the user `computer`, in your working folder (home until you call set_cwd). Returns the exit code, how long it ran, then stdout and stderr separately. A non-zero exit code is a normal result. The call returns when the command exits, so start servers and other long-running jobs in the background with their output redirected, for example `setsid nohup npm run dev >/tmp/dev.log 2>&1 &`. A job started that way keeps running, and without `setsid` it is killed if the command times out. Commands cannot read input. When your session has a screen, DISPLAY points at it, so GUI programs open where you look. A command that runs longer than `timeout` seconds is killed together with everything it started, and the reply says so and holds the output printed until then. Output over about 30000 bytes keeps its start and end with a marker in between, so write big output to a file. Several commands may run at once, and they never wait for your desktop actions."
+    )]
+    async fn shell(
+        &self,
+        Parameters(args): Parameters<ShellArgs>,
+    ) -> Result<CallToolResult, String> {
+        let result = self.run_shell(args).await;
+        result.map_err(|error| {
+            let message = format!("{error:#}");
+            error!(tool = "shell", error = %message, "tool call failed");
+            message
+        })
+    }
+
+    #[tool(
+        description = "Set the working folder of your session. Your shell commands start there, and relative paths in file tools resolve from it. A relative path starts at the current working folder, `~` is home, and the folder must exist. Starts at home. Returns the new absolute path."
+    )]
+    async fn set_cwd(&self, Parameters(args): Parameters<SetCwdArgs>) -> Result<String, String> {
+        let result = self.change_cwd(args).await;
+        report("set_cwd", result)
+    }
 }
 
 #[expect(
@@ -290,7 +406,12 @@ mod tests {
             name: name.clone(),
             volume: settings.volume(),
         };
-        let server = Server::new(settings, image::from_env(), Ok(ScreenSize::default()));
+        let server = Server::new(
+            settings,
+            image::from_env(),
+            Ok(ScreenSize::default()),
+            Ok(ShellTimeouts::default()),
+        );
 
         let first = server.start("first task").await.unwrap();
         server.end(first.as_str()).await.unwrap();
@@ -323,7 +444,12 @@ mod tests {
             name,
             volume: settings.volume(),
         };
-        let server = Server::new(settings, image::from_env(), Ok(ScreenSize::default()));
+        let server = Server::new(
+            settings,
+            image::from_env(),
+            Ok(ScreenSize::default()),
+            Ok(ShellTimeouts::default()),
+        );
 
         let session = server.start("watcher").await.unwrap();
         let other = server.start("other watcher").await.unwrap();
@@ -368,8 +494,14 @@ mod tests {
             settings.clone(),
             image::from_env(),
             Ok(ScreenSize::default()),
+            Ok(ShellTimeouts::default()),
         );
-        let two = Server::new(settings, image::from_env(), Ok(ScreenSize::default()));
+        let two = Server::new(
+            settings,
+            image::from_env(),
+            Ok(ScreenSize::default()),
+            Ok(ShellTimeouts::default()),
+        );
 
         let (first, second) = tokio::join!(one.start("one"), two.start("two"));
         assert_ne!(first.unwrap(), second.unwrap());
@@ -408,7 +540,12 @@ mod tests {
             name,
             volume: settings.volume(),
         };
-        let server = Server::new(settings, image::from_env(), Ok(ScreenSize::default()));
+        let server = Server::new(
+            settings,
+            image::from_env(),
+            Ok(ScreenSize::default()),
+            Ok(ShellTimeouts::default()),
+        );
         let session = server.start("actor").await.unwrap();
 
         let menu = server
@@ -466,5 +603,131 @@ mod tests {
             .unwrap();
         server.act(scroll()).await.unwrap();
         server.end(session.as_str()).await.unwrap();
+    }
+
+    fn text_of(result: &CallToolResult) -> String {
+        serde_json::to_value(&result.content[0]).unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn shell_args(session: &SessionId, command: &str, timeout: Option<u64>) -> ShellArgs {
+        serde_json::from_value(serde_json::json!({
+            "session": session.as_str(),
+            "command": command,
+            "timeout": timeout,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Docker"]
+    async fn shell_runs_in_the_session_folder_and_a_timeout_leaves_nothing_behind() {
+        let name = format!("computer-use-test-{}", Uuid::new_v4().simple());
+        let settings = Settings {
+            name: name.clone(),
+            timezone: None,
+        };
+        let docker = Docker::connect_with_defaults().unwrap();
+        let _cleanup = Cleanup {
+            docker,
+            name,
+            volume: settings.volume(),
+        };
+        let timeouts = ShellTimeouts::new(60, 120).unwrap();
+        let server = Server::new(
+            settings,
+            image::from_env(),
+            Ok(ScreenSize::default()),
+            Ok(timeouts),
+        );
+        let session = server.start("shell user").await.unwrap();
+        let run = |command: &'static str, timeout| {
+            let args = shell_args(&session, command, timeout);
+            async { server.run_shell(args).await.map(|result| text_of(&result)) }
+        };
+        let cwd = |path: &str| {
+            server.change_cwd(
+                serde_json::from_value(
+                    serde_json::json!({ "session": session.as_str(), "path": path }),
+                )
+                .unwrap(),
+            )
+        };
+
+        let mixed = run("echo hi; echo err >&2; exit 3", None).await.unwrap();
+        assert!(mixed.starts_with("exit code: 3"), "{mixed}");
+        assert!(
+            mixed.contains(
+                "--- stdout ---
+hi
+"
+            ),
+            "{mixed}"
+        );
+        assert!(
+            mixed.contains(
+                "--- stderr ---
+err
+"
+            ),
+            "{mixed}"
+        );
+
+        assert_eq!(cwd("/tmp").await.unwrap(), "working folder: /tmp");
+        assert!(run("pwd", None).await.unwrap().contains(
+            "--- stdout ---
+/tmp
+"
+        ));
+        let missing = cwd("/does/not/exist").await.unwrap_err();
+        assert!(missing.to_string().contains("/does/not/exist"), "{missing}");
+        assert!(run("pwd", None).await.unwrap().contains(
+            "
+/tmp
+"
+        ));
+
+        let before_screen = run("echo \"[$DISPLAY]\"", None).await.unwrap();
+        assert!(before_screen.contains("[]"), "{before_screen}");
+        server.observe(session.as_str()).await.unwrap();
+        let with_screen = run("echo \"[$DISPLAY]\"", None).await.unwrap();
+        assert!(!with_screen.contains("[]"), "{with_screen}");
+
+        let started = std::time::Instant::now();
+        let slow = run("echo begun; sleep 1000 & wait", Some(2)).await;
+        let text = slow.unwrap();
+        assert!(text.starts_with("timed out after 2 s"), "{text}");
+        assert!(text.contains("begun"), "{text}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let left = run("pgrep -x sleep || echo none", None).await.unwrap();
+        assert!(
+            left.contains(
+                "--- stdout ---
+none
+"
+            ),
+            "{left}"
+        );
+
+        server.end(session.as_str()).await.unwrap();
+    }
+
+    #[test]
+    fn shell_timeout_settings_default_and_validate() {
+        let secs = |default, max| {
+            shell_timeouts_from(default, max)
+                .map(|timeouts| (timeouts.effective(None).as_secs(), timeouts.max().as_secs()))
+        };
+        assert_eq!(secs(None, None), Ok((120, 600)));
+        assert_eq!(secs(Some("30"), Some("90")), Ok((30, 90)));
+        assert_eq!(secs(None, Some("60")), Ok((60, 60)));
+        assert_eq!(secs(Some(""), Some("")), Ok((120, 600)));
+        let above = secs(Some("700"), None).unwrap_err();
+        assert!(above.contains("must not exceed"), "{above}");
+        let junk = secs(Some("2m"), None).unwrap_err();
+        assert!(junk.starts_with("COMPUTER_USE_SHELL_TIMEOUT=2m"), "{junk}");
+        assert!(secs(Some("0"), None).is_err());
     }
 }

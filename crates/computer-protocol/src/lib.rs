@@ -1,13 +1,19 @@
 use serde::{Deserialize, Serialize};
 
 pub mod act;
+mod shell;
 
 pub use act::{
     ActReply, ActRequest, Action, ActionError, Button, Direction, Kind, Point, RawAction,
 };
+pub use shell::{
+    DEFAULT_SHELL_TIMEOUT_MAX_SECS, DEFAULT_SHELL_TIMEOUT_SECS, LONGEST_SHELL_TIMEOUT_SECS,
+    SetCwdReply, SetCwdRequest, ShellOutcome, ShellReply, ShellRequest, ShellTimeouts,
+    ShellTimeoutsError,
+};
 
 /// Version of the wire format between the host and `computerd`.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 pub const RELEASE_VERSION: Option<&str> = match option_env!("COMPUTER_USE_MCP_VERSION") {
     Some(version) if !version.is_empty() => Some(version),
@@ -175,6 +181,8 @@ pub struct CreateSession {
     pub title: SessionTitle,
     /// Size of the session's screen, applied when the screen opens.
     pub screen_size: ScreenSize,
+    /// Timeouts for the session's shell commands.
+    pub shell_timeouts: ShellTimeouts,
 }
 
 /// Length of a session id, in hex digits.
@@ -327,7 +335,7 @@ mod tests {
 
     #[test]
     fn request_body_with_a_bad_title_is_refused() {
-        let body = serde_json::json!({ "title": "", "screen_size": "1280x800" });
+        let body = serde_json::json!({ "title": "", "screen_size": "1280x800", "shell_timeouts": { "default_secs": 120, "max_secs": 600 } });
         assert!(serde_json::from_value::<CreateSession>(body).is_err());
     }
 }

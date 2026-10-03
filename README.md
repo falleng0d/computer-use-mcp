@@ -2,7 +2,7 @@
 
 An MCP server that gives AI agents a computer. Any MCP client, such as Claude Code or OpenCode, can see and control one shared Linux desktop that runs in Docker. You can watch and use the same desktop through VNC.
 
-> **Status:** early. The MCP server starts the computer and hands out sessions (`start_computer`, `end_session`), shows each session its own screen (`computer_observe`), and lets it click, type, and scroll (`computer_act`). The other tools are not built yet.
+> **Status:** early. The MCP server starts the computer and hands out sessions (`start_computer`, `end_session`), shows each session its own screen (`computer_observe`), and lets it click, type, and scroll (`computer_act`), and runs shell commands (`shell`, `set_cwd`). The file tools are not built yet.
 
 ## Design
 
@@ -35,6 +35,8 @@ Add it to your agent host as an MCP server that runs `computer-use-mcp` with no 
 | --- | --- | --- |
 | `COMPUTER_USE_NAME` | `computer-use` | Name of the container. The home volume is `<name>-home`. Applies at creation. |
 | `COMPUTER_USE_SCREEN_SIZE` | `1280x800` | Size of each session's screen, as `<width>x<height>` with sides from 320 to 7680. Read when `start_computer` runs. |
+| `COMPUTER_USE_SHELL_TIMEOUT` | `120` | Seconds a `shell` command may run when the agent gives no timeout. Must not exceed the maximum. Read when `start_computer` runs. |
+| `COMPUTER_USE_SHELL_TIMEOUT_MAX` | `600` | Longest timeout an agent may ask for, in seconds. If the default is unset and this is lower than 120, the default follows it. Read when `start_computer` runs. |
 | `COMPUTER_USE_IMAGE` | Release builds use `ghcr.io/falleng0d/computer-use-mcp:<version>`. Dev builds use `computer-use-mcp:dev`. | Image used for the computer container. |
 
 Release builds pull their image when it is missing. Dev builds never pull, so a dev host binary is never paired with an old image by accident. Build the dev image with `just image`.
@@ -44,6 +46,10 @@ The server makes no Docker calls until an agent calls `start_computer`. That too
 `computer_observe` takes the session id and returns a PNG of that session's own screen plus the frame id, capture time, size, cursor position, and active window title. The first call opens the screen, which is one `Xvnc` and Fluxbox inside the computer. The computer has 16 screens. A session that never calls it gets none, and ending the session closes its screen. When nothing changed since the session's previous screenshot, the image is left out and the text says so.
 
 `computer_act` takes the session id and up to 24 ordered actions: `click`, `move`, `down`, `up`, `type`, `key`, `scroll`, `wait`, and `focus`. Positions are pixels on the session's screen. A double click counts as two actions. Waits and the settle time are capped at 5 s, and a scroll takes 1 to 20 steps. `type` handles any Unicode text. `key` takes names such as `enter`, `esc`, and `f5` with the modifiers `ctrl`, `alt`, `shift`, and `super` (also `cmd`, `option`, `meta`, `win`). `focus` raises an open window by its class or title. Launching apps comes later. The batch ends with a screenshot by default, taken `settle_ms` (default 300) after the last action, and the unchanged-frame rule applies to it. Set `observe` to false to skip it. The 4th identical batch of scroll, pointer, or key actions in a row that leaves the screen unchanged is refused.
+
+`shell` takes the session id, a command, and an optional `timeout` in seconds. It runs `bash -lc` as the user `computer` inside the computer, in the session's working folder (home until `set_cwd` changes it), with no input. `DISPLAY` points at the session's screen when it has one. The result gives the exit code, the duration, and stdout and stderr separately. A failing command is a normal result. A command that runs past its timeout is killed with everything it started, and the result says so and keeps the output printed until then. Each stream keeps its first and last 15000 bytes with a `[... N bytes omitted ...]` marker between them. The call returns when the command exits, so start long-running jobs in the background with their output redirected, for example `setsid nohup server >log 2>&1 &`. Shell calls never wait for desktop actions, and one session may run several at once.
+
+`set_cwd` takes the session id and a path, resolves a relative path from the current working folder (`~` is home), and fails when the folder does not exist. It returns the new absolute path.
 
 ## Development
 

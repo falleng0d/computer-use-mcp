@@ -1,15 +1,29 @@
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use computer_protocol::{ActReply, ActRequest, Observation, ScreenSize, SessionId, SessionTitle};
+use computer_protocol::{
+    ActReply, ActRequest, Observation, ScreenSize, SessionId, SessionTitle, SetCwdReply,
+    SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts,
+};
 use tracing::{info, warn};
 
-use crate::screen::{Numbers, Screen, ScreenError};
+use crate::{
+    exec,
+    screen::{Numbers, Screen, ScreenError},
+    workdir,
+};
 
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(25);
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .expect("session fields are only held for short copies")
+}
 
 /// Why a call on a session failed.
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +42,11 @@ pub enum SessionError {
 struct Session {
     title: SessionTitle,
     screen_size: ScreenSize,
+    shell_timeouts: ShellTimeouts,
+    /// Folder shell commands start in.
+    cwd: Mutex<PathBuf>,
+    /// Display number of the open screen. Shell calls read it without touching the screen lock.
+    display: Mutex<Option<u8>>,
     /// Holds the session's screen. Desktop actions lock it, so they run one at a time.
     screen: Arc<tokio::sync::Mutex<Slot>>,
 }
@@ -49,18 +68,38 @@ impl Slot {
 }
 
 /// Every session of the computer and the screens they own.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Sessions {
     map: Arc<Mutex<HashMap<SessionId, Arc<Session>>>>,
     numbers: Numbers,
+    home: PathBuf,
+}
+
+impl Default for Sessions {
+    fn default() -> Self {
+        Self {
+            map: Arc::default(),
+            numbers: Numbers::default(),
+            home: workdir::home_dir(),
+        }
+    }
 }
 
 impl Sessions {
-    pub fn insert(&self, id: SessionId, title: SessionTitle, screen_size: ScreenSize) {
+    pub fn insert(
+        &self,
+        id: SessionId,
+        title: SessionTitle,
+        screen_size: ScreenSize,
+        shell_timeouts: ShellTimeouts,
+    ) {
         info!(session = %id, title = title.as_str(), %screen_size, "session started");
         let session = Session {
             title,
             screen_size,
+            shell_timeouts,
+            cwd: Mutex::new(self.home.clone()),
+            display: Mutex::new(None),
             screen: Arc::new(tokio::sync::Mutex::new(Slot::Unopened)),
         };
         self.lock().insert(id, Arc::new(session));
@@ -123,6 +162,7 @@ impl Sessions {
                 .await
                 .map_err(SessionError::Failed)?;
             info!(session = %id, screen = screen.number(), "screen assigned");
+            *lock(&session.display) = Some(screen.number());
             *slot = Slot::Open(Box::new(screen));
         }
         let Slot::Open(screen) = &mut *slot else {
@@ -138,6 +178,7 @@ impl Sessions {
             Err(_) => anyhow::anyhow!("the call timed out after {} s", timeout.as_secs()),
         };
         warn!(session = %id, error = %format!("{failure:#}"), "closing a broken screen");
+        *lock(&session.display) = None;
         *slot = match std::mem::replace(&mut *slot, Slot::Unopened) {
             Slot::Open(screen) => {
                 (*screen).close().await;
@@ -148,6 +189,46 @@ impl Sessions {
         Err(SessionError::Failed(failure.context(
             "the screen stopped working and was closed, open windows are lost; call computer_observe again to get a fresh screen",
         )))
+    }
+
+    /// Runs a shell command in the session's working folder.
+    ///
+    /// Never waits for the screen lock, and any number of commands of a session may run at once.
+    pub async fn shell(
+        &self,
+        id: &SessionId,
+        request: ShellRequest,
+    ) -> Result<ShellReply, SessionError> {
+        let session = self.get(id)?;
+        let job = exec::Job {
+            command: request.command,
+            cwd: lock(&session.cwd).clone(),
+            display: *lock(&session.display),
+            timeout: session.shell_timeouts.effective(request.timeout_secs),
+        };
+        exec::run(job).await.map_err(SessionError::Failed)
+    }
+
+    /// Changes the session's working folder and returns its absolute path.
+    pub async fn set_cwd(
+        &self,
+        id: &SessionId,
+        request: SetCwdRequest,
+    ) -> Result<SetCwdReply, SessionError> {
+        let session = self.get(id)?;
+        let current = self.cwd(id)?;
+        let new = workdir::existing_dir(&current, &self.home, &request.path)
+            .await
+            .map_err(SessionError::Rejected)?;
+        lock(&session.cwd).clone_from(&new);
+        Ok(SetCwdReply {
+            cwd: new.display().to_string(),
+        })
+    }
+
+    /// The session's working folder, the base of relative paths.
+    pub fn cwd(&self, id: &SessionId) -> Result<PathBuf, SessionError> {
+        Ok(lock(&self.get(id)?.cwd).clone())
     }
 
     /// Closes every screen. Called when `computerd` shuts down.
