@@ -5,7 +5,7 @@ use computer_protocol::{
     ActReply, ActRequest, ApiError, CreateSession, Health, ListFilesReply, ListFilesRequest,
     Observation, OwnerId, PROTOCOL_VERSION, ReadFileReply, ReadFileRequest, ScreenSize,
     SessionCreated, SessionId, SessionTitle, SetCwdReply, SetCwdRequest, ShellReply, ShellRequest,
-    ShellTimeouts, VERSION, WriteFileReply, WriteFileRequest,
+    ShellTimeouts, VERSION, ViewerInfo, WriteFileReply, WriteFileRequest,
 };
 use reqwest::StatusCode;
 
@@ -128,6 +128,21 @@ impl Client {
             .await
             .context("ending the session")?;
         check(response).await.map(|_| ())
+    }
+
+    /// The viewer password and how many viewer pages are open.
+    pub async fn viewer(&self) -> Result<ViewerInfo> {
+        self.http
+            .get(format!("{}/viewer", self.base))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .context("asking the computer for its viewer link")?
+            .error_for_status()
+            .context("asking the computer for its viewer link")?
+            .json()
+            .await
+            .context("reading the viewer link")
     }
 
     /// Tells `computerd` the owner is alive, which keeps all its sessions.

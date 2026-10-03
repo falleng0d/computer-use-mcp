@@ -5,20 +5,23 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use computer_protocol::{
-    ActReply, ActRequest, CreateSession, ListFilesReply, ListFilesRequest, Observation, OwnerId,
-    ReadFileReply, ReadFileRequest, ScreenSize, SessionId, SessionTitle, SetCwdReply,
-    SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts, WriteFileReply, WriteFileRequest,
+    ActReply, ActRequest, CreateSession, DEFAULT_PORT_BASE, ListFilesReply, ListFilesRequest,
+    Observation, OwnerId, ReadFileReply, ReadFileRequest, ScreenSize, SessionId, SessionTitle,
+    SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts, WriteFileReply,
+    WriteFileRequest,
 };
+use serde::Serialize;
 use tokio::{task::JoinHandle, time::Instant};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{info, warn};
 
 use crate::{
     exec, files,
+    hub::Hub,
     liveness::{self, EndReason, Liveness},
     screen::{Numbers, Screen, ScreenError},
     workdir,
@@ -53,11 +56,25 @@ pub enum SessionError {
     Failed(anyhow::Error),
 }
 
+/// One session as the viewer page lists it.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct SessionView {
+    /// First 8 characters of the session id, enough to tell sessions apart on the page.
+    pub id: String,
+    pub title: String,
+    pub screen: Option<u8>,
+    /// Start time in seconds since the Unix epoch.
+    pub started: u64,
+    /// Viewers attached to the session's screen.
+    pub viewers: usize,
+}
+
 struct Session {
     title: SessionTitle,
     owner: OwnerId,
     idle: Duration,
     created: Instant,
+    started: u64,
     /// Time the last agent call started or finished.
     last_activity: Mutex<Instant>,
     /// Agent calls running now.
@@ -95,7 +112,7 @@ impl Drop for Call {
 }
 
 impl Session {
-    fn liveness(&self, now: Instant, owner_seen: Option<Instant>) -> Liveness {
+    fn liveness(&self, now: Instant, owner_seen: Option<Instant>, viewers: usize) -> Liveness {
         Liveness {
             now,
             created: self.created,
@@ -103,12 +120,24 @@ impl Session {
             owner_seen,
             idle: self.idle,
             call_running: self.calls.load(Ordering::SeqCst) > 0,
+            viewers,
         }
+    }
+
+    fn screen(&self) -> Option<u8> {
+        *lock(&self.display)
     }
 }
 
-/// Closes the screen of a session that has ended, waiting a bounded time for a call that still holds it.
-async fn close_screen(session: Arc<Session>) {
+/// Closes the screen of a session that has ended once no viewer is attached to it,
+/// waiting a bounded time for a call that still holds it.
+async fn close_screen(session: Arc<Session>, hub: Hub, shutdown: CancellationToken) {
+    if let Some(screen) = session.screen() {
+        tokio::select! {
+            () = hub.detached(screen) => {}
+            () = shutdown.cancelled() => {}
+        }
+    }
     if let Ok(mut slot) = tokio::time::timeout(CLOSE_TIMEOUT, session.screen.lock()).await {
         slot.close().await;
     } else {
@@ -145,6 +174,7 @@ pub struct Sessions {
     ended: Arc<Mutex<VecDeque<(SessionId, EndReason)>>>,
     /// Screen closes of ended sessions, awaited at shutdown.
     closing: TaskTracker,
+    hub: Hub,
     numbers: Numbers,
     home: PathBuf,
     shutdown: CancellationToken,
@@ -152,19 +182,48 @@ pub struct Sessions {
 
 impl Default for Sessions {
     fn default() -> Self {
+        Self::new(Hub::new(DEFAULT_PORT_BASE))
+    }
+}
+
+impl Sessions {
+    pub fn new(hub: Hub) -> Self {
         Self {
             map: Arc::default(),
             owners: Arc::default(),
             ended: Arc::default(),
             closing: TaskTracker::new(),
+            hub,
             numbers: Numbers::default(),
             home: workdir::home_dir(),
             shutdown: CancellationToken::new(),
         }
     }
-}
 
-impl Sessions {
+    pub fn hub(&self) -> Hub {
+        self.hub.clone()
+    }
+
+    /// The sessions the viewer page lists, oldest first.
+    pub fn views(&self) -> Vec<SessionView> {
+        let mut views: Vec<_> = self
+            .lock()
+            .iter()
+            .map(|(id, session)| {
+                let screen = session.screen();
+                SessionView {
+                    id: id.to_string().chars().take(8).collect(),
+                    title: session.title.as_str().to_owned(),
+                    screen,
+                    started: session.started,
+                    viewers: screen.map_or(0, |screen| self.hub.viewers(screen)),
+                }
+            })
+            .collect();
+        views.sort_by(|a, b| (a.started, &a.id).cmp(&(b.started, &b.id)));
+        views
+    }
+
     pub fn insert(&self, id: SessionId, request: CreateSession) {
         let idle = Duration::from_secs(u64::from(request.idle_secs.get()));
         info!(
@@ -181,6 +240,9 @@ impl Sessions {
             owner: request.owner,
             idle,
             created: now,
+            started: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs()),
             last_activity: Mutex::new(now),
             calls: AtomicUsize::new(0),
             screen_size: request.screen_size,
@@ -191,6 +253,7 @@ impl Sessions {
             screen: Arc::new(tokio::sync::Mutex::new(Slot::Unopened)),
         };
         self.lock().insert(id, Arc::new(session));
+        self.hub.notify();
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, Arc<Session>>> {
@@ -234,7 +297,9 @@ impl Sessions {
     pub async fn end(&self, id: &SessionId) -> Result<(), SessionError> {
         let removed = self.lock().remove(id);
         let session = removed.ok_or_else(|| self.missing(id))?;
-        let _ = self.finish(id, session, EndReason::Agent).await;
+        if let Some(closed) = self.finish(id, session, EndReason::Agent) {
+            let _ = closed.await;
+        }
         Ok(())
     }
 
@@ -258,7 +323,7 @@ impl Sessions {
             .map(|(id, session)| self.finish(&id, session, EndReason::OwnerLeft))
             .collect();
         let count = closing.len();
-        for closed in closing {
+        for closed in closing.into_iter().flatten() {
             let _ = closed.await;
         }
         count
@@ -274,7 +339,14 @@ impl Sessions {
                 .iter()
                 .filter_map(|(id, session)| {
                     let seen = owners.get(&session.owner).copied();
-                    liveness::end_reason(&session.liveness(now, seen)).map(|why| (id.clone(), why))
+                    let viewers = session
+                        .screen()
+                        .map_or(0, |screen| self.hub.viewers(screen));
+                    if viewers > 0 {
+                        *lock(&session.last_activity) = now;
+                    }
+                    liveness::end_reason(&session.liveness(now, seen, viewers))
+                        .map(|why| (id.clone(), why))
                 })
                 .collect();
             due.into_iter()
@@ -303,9 +375,15 @@ impl Sessions {
     /// Finishes a session already removed from the map.
     ///
     /// Remembers why and kills its commands and running screen call right away, then closes its
-    /// screen in a task `Sessions` owns. The returned handle completes when the screen is closed,
-    /// and dropping it does not stop the close.
-    fn finish(&self, id: &SessionId, session: Arc<Session>, why: EndReason) -> JoinHandle<()> {
+    /// screen in a task `Sessions` owns once the last viewer of the screen disconnects. The returned
+    /// handle completes when the screen is closed and dropping it does not stop the close. It is
+    /// `None` when a viewer is attached, because the close then waits for the viewer.
+    fn finish(
+        &self,
+        id: &SessionId,
+        session: Arc<Session>,
+        why: EndReason,
+    ) -> Option<JoinHandle<()>> {
         info!(
             session = %id,
             title = session.title.as_str(),
@@ -321,7 +399,16 @@ impl Sessions {
             ended.push_back((id.clone(), why));
         }
         session.cancel.cancel();
-        self.closing.spawn(close_screen(session))
+        let viewed = session
+            .screen()
+            .is_some_and(|screen| self.hub.viewers(screen) > 0);
+        let closed = self.closing.spawn(close_screen(
+            session,
+            self.hub.clone(),
+            self.shutdown.clone(),
+        ));
+        self.hub.notify();
+        (!viewed).then_some(closed)
     }
 
     /// Captures the session's screen, opening it first when this is the session's first call.
@@ -365,6 +452,13 @@ impl Sessions {
                 .map_err(SessionError::Failed)?;
             info!(session = %id, screen = screen.number(), "screen assigned");
             *lock(&session.display) = Some(screen.number());
+            info!(
+                screen = screen.number(),
+                title = session.title.as_str(),
+                vnc_port = self.hub.host_vnc_port(screen.number()),
+                "screen opened for viewing"
+            );
+            self.hub.notify();
             *slot = Slot::Open(Box::new(screen));
         }
         let Slot::Open(screen) = &mut *slot else {
@@ -385,6 +479,7 @@ impl Sessions {
         };
         warn!(session = %id, error = %format!("{failure:#}"), "closing a broken screen");
         *lock(&session.display) = None;
+        self.hub.notify();
         *slot = match std::mem::replace(&mut *slot, Slot::Unopened) {
             Slot::Open(screen) => {
                 (*screen).close().await;
@@ -478,10 +573,15 @@ impl Sessions {
 
     /// Closes every screen and waits for the closes of sessions that ended earlier. Called when `computerd` shuts down.
     pub async fn close_all(&self) {
+        self.shutdown.cancel();
         let sessions: Vec<Arc<Session>> = self.lock().drain().map(|(_, session)| session).collect();
         for session in sessions {
             session.cancel.cancel();
-            drop(self.closing.spawn(close_screen(session)));
+            drop(self.closing.spawn(close_screen(
+                session,
+                self.hub.clone(),
+                self.shutdown.clone(),
+            )));
         }
         self.closing.close();
         self.closing.wait().await;
@@ -665,5 +765,60 @@ mod tests {
             sessions.end(&kept).await,
             Err(SessionError::Unknown)
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_viewed_session_ends_at_once_but_its_screen_closes_when_the_viewer_leaves() {
+        let sessions = Sessions::default();
+        let who = owner('a');
+        let id = start(&sessions, '1', &who, 3600);
+        let session = sessions.get(&id).unwrap();
+        *lock(&session.display) = Some(3);
+        let viewer = sessions.hub().attach(3);
+
+        sessions.end(&id).await.unwrap();
+        pass(5).await;
+        assert!(session.cancel.is_cancelled());
+        assert!(sessions.get(&id).is_err());
+        assert_eq!(sessions.closing.len(), 1);
+
+        drop(viewer);
+        pass(1).await;
+        assert_eq!(sessions.closing.len(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_viewer_pauses_the_idle_timer_and_it_restarts_when_the_viewer_leaves() {
+        let sessions = Sessions::default();
+        let who = owner('a');
+        let id = start(&sessions, '1', &who, 20);
+        *lock(&sessions.get(&id).unwrap().display) = Some(2);
+        let viewer = sessions.hub().attach(2);
+        let stop = CancellationToken::new();
+        let reaper = tokio::spawn({
+            let (sessions, stop) = (sessions.clone(), stop.clone());
+            async move { sessions.reap_until(stop).await }
+        });
+
+        for _ in 0..6 {
+            pass(10).await;
+            sessions.heartbeat(&who);
+        }
+        assert!(sessions.get(&id).is_ok());
+
+        drop(viewer);
+        {
+            pass(10).await;
+            sessions.heartbeat(&who);
+        }
+        assert!(sessions.get(&id).is_ok());
+        pass(11).await;
+        sessions.heartbeat(&who);
+        assert_eq!(
+            ended_by(&sessions, &id),
+            Some(EndReason::Idle(Duration::from_secs(20)))
+        );
+        stop.cancel();
+        reaper.await.unwrap();
     }
 }

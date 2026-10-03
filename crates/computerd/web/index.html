@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Computer</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<aside id="sidebar">
+  <h1>Screens</h1>
+  <div id="status"></div>
+  <ul id="sessions"></ul>
+</aside>
+<main id="stage">
+  <div id="banner" hidden>This session ended. The screen closes when you disconnect.</div>
+  <div id="screen"></div>
+  <div id="message"><span id="message-text"></span><button id="reconnect" hidden>Reconnect</button></div>
+</main>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

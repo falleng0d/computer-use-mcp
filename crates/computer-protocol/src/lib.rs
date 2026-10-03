@@ -20,7 +20,7 @@ pub use shell::{
 };
 
 /// Version of the wire format between the host and `computerd`.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 pub const RELEASE_VERSION: Option<&str> = match option_env!("COMPUTER_USE_MCP_VERSION") {
     Some(version) if !version.is_empty() => Some(version),
@@ -38,6 +38,32 @@ pub const API_PORT: u16 = 7070;
 /// Environment variable that carries the API token into the container.
 pub const TOKEN_ENV: &str = "COMPUTERD_TOKEN";
 
+/// Environment variable that tells `computerd` which host port its viewer port is published on.
+pub const HOST_PORT_BASE_ENV: &str = "COMPUTERD_HOST_PORT_BASE";
+
+/// Host port the viewer page is published on unless the user picks another base.
+pub const DEFAULT_PORT_BASE: u16 = 20900;
+
+/// Port of the viewer page and its WebSocket bridge inside the container.
+pub const VIEWER_PORT: u16 = 20900;
+
+/// Number of screens the computer has.
+pub const SCREEN_COUNT: u8 = 16;
+
+/// Port inside the container where raw VNC for `screen` (1 to [`SCREEN_COUNT`]) is served.
+#[must_use]
+pub fn vnc_port(screen: u8) -> u16 {
+    VIEWER_PORT + u16::from(screen)
+}
+
+/// Link that opens the viewer page when the host publishes it on `host_port`.
+///
+/// The password after `#key=` stays in the browser and is never sent to the server in a request line.
+#[must_use]
+pub fn viewer_link(host_port: u16, key: &str) -> String {
+    format!("http://127.0.0.1:{host_port}/#key={key}")
+}
+
 /// Longest accepted session title, in characters.
 pub const MAX_TITLE_CHARS: usize = 80;
 
@@ -45,6 +71,15 @@ pub const MAX_TITLE_CHARS: usize = 80;
 pub struct Health {
     pub protocol_version: u32,
     pub version: String,
+}
+
+/// What the host needs to know about the viewer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewerInfo {
+    /// Password for the viewer page and for raw VNC.
+    pub key: String,
+    /// Viewer pages open in a browser now.
+    pub pages: usize,
 }
 
 /// Why a session title was refused.

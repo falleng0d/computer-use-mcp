@@ -17,13 +17,16 @@ use tracing::{info, warn};
 use crate::{
     frames::{self, FrameTracker},
     guard::{LoopGuard, Outcome},
+    key,
     plan::{self, Input, Step},
+    workdir,
     x11::Capturer,
 };
 
 pub const FIRST_SCREEN: u8 = 1;
 pub const LAST_SCREEN: u8 = 16;
 
+pub const XVNC_FIRST_PORT: u16 = 5900;
 const FLUXBOX_INIT: &str = "/etc/computerd/fluxbox-init";
 const X_SOCKET_DIR: &str = "/tmp/.X11-unix";
 const X_READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -135,11 +138,20 @@ struct Processes {
 
 impl Processes {
     fn start_xvnc(number: u8, size: ScreenSize) -> Result<Self> {
+        let xvnc_port = XVNC_FIRST_PORT + u16::from(number);
+        let password_file = key::vnc_password_path(&workdir::home_dir());
         let xvnc = Command::new("Xvnc")
             .arg(display(number))
             .args(["-geometry", &size.to_string(), "-depth", "24"])
-            .args(["-AcceptSetDesktopSize=0", "-nolisten", "tcp"])
-            .args(["-localhost", "-SecurityTypes", "None"])
+            .args([
+                "-AcceptSetDesktopSize=0",
+                "-AlwaysShared",
+                "-nolisten",
+                "tcp",
+            ])
+            .args(["-localhost", "-rfbport", &xvnc_port.to_string()])
+            .args(["-SecurityTypes", "VncAuth", "-rfbauth"])
+            .arg(password_file)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .kill_on_drop(true)

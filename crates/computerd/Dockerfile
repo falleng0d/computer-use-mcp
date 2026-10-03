@@ -20,6 +20,12 @@ RUN gpg --import /tmp/awscli.pub \
     && gpg --status-fd 1 --verify /tmp/aws.zip.sig /tmp/aws.zip | grep -q 'VALIDSIG .* FB5DB77FD5C118B80511ADA8A6310ACC4672475C' \
     && unzip -q /tmp/aws.zip -d /tmp \
     && /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli
+FROM debian:trixie-slim AS novnc
+ARG NOVNC_VERSION=1.7.0
+ARG NOVNC_SHA256=b1003a11b6e6e8d8f7f5e5586daae7f8ca651d8aee0aa155ff9ac841c48f52c6
+RUN apt-get update     && apt-get install -y --no-install-recommends ca-certificates curl
+RUN curl -fsSL "https://github.com/novnc/noVNC/archive/refs/tags/v${NOVNC_VERSION}.tar.gz" -o /tmp/novnc.tar.gz     && echo "${NOVNC_SHA256}  /tmp/novnc.tar.gz" | sha256sum -c -     && mkdir -p /out /tmp/src     && tar -xzf /tmp/novnc.tar.gz -C /tmp/src --strip-components=1     && cp -r /tmp/src/core /tmp/src/vendor /tmp/src/LICENSE.txt /out/
+
 FROM debian:trixie-slim
 ARG NODE_MAJOR=24
 # apt lists stay in the image so `sudo apt-get install` works without an update first.
@@ -51,11 +57,12 @@ COPY --chmod=0644 crates/computerd/image/profile.sh /etc/profile.d/computer.sh
 COPY --chmod=0644 crates/computerd/image/XTerm /etc/X11/app-defaults/XTerm
 COPY --chmod=0755 crates/computerd/image/check-tools.sh /usr/local/bin/check-tools
 COPY --from=build /usr/local/bin/computerd /usr/local/bin/computerd
+COPY --from=novnc /out /opt/novnc
 COPY crates/computerd/image/fluxbox-init /etc/computerd/fluxbox-init
 ENV NPM_CONFIG_PREFIX=/home/computer/.local \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
     PATH=/home/computer/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 USER computer
 WORKDIR /home/computer
-EXPOSE 7070
+EXPOSE 7070 20900-20916
 CMD ["computerd"]

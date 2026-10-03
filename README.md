@@ -1,6 +1,6 @@
 # computer-use-mcp
 
-An MCP server that gives AI agents a computer. Any MCP client, such as Claude Code or OpenCode, can see and control one shared Linux desktop that runs in Docker. You can watch and use the same desktop through VNC.
+An MCP server that gives AI agents a computer. Any MCP client, such as Claude Code or OpenCode, can see and control one shared Linux desktop that runs in Docker. You can watch and use the same desktop in a browser or with any VNC client.
 
 > **Status:** early. The MCP server starts the computer and hands out sessions (`start_computer`, `end_session`), shows each session its own screen (`computer_observe`), and lets it click, type, and scroll (`computer_act`), runs shell commands (`shell`, `set_cwd`), and lists, reads, and writes files (`list_files`, `read_file`, `write_file`).
 
@@ -12,7 +12,7 @@ An MCP server that gives AI agents a computer. Any MCP client, such as Claude Co
 - Files in the volume survive container restarts and container deletion. Only you stop or delete the computer, with `docker stop` or `docker rm`.
 - The computer is Debian 13 with Python 3, uv, Node.js 24 (LTS), Git, `gh`, the AWS CLI v2, Ruby, fish (bash stays the default shell), build tools, ripgrep, ImageMagick, clipboard tools, and fonts for Latin, CJK, and emoji.
 - The user `computer` has passwordless `sudo`, so agents can `sudo apt-get install` more. Only home survives when the container is recreated, so system packages are lost then. `npm install -g` and `pip install` go to `~/.local` (first on `PATH`) and survive.
-- The container logs print the VNC link and credentials, so you can reopen a closed VNC session.
+- The container logs print the viewer link and the VNC password, so you can reopen a closed view.
 
 The project has three Rust crates:
 
@@ -40,6 +40,7 @@ Add it to your agent host as an MCP server that runs `computer-use-mcp` with no 
 | `COMPUTER_USE_SHELL_TIMEOUT` | `120` | Seconds a `shell` command may run when the agent gives no timeout. Must not exceed the maximum. Read when `start_computer` runs. |
 | `COMPUTER_USE_SHELL_TIMEOUT_MAX` | `600` | Longest timeout an agent may ask for, in seconds. If the default is unset and this is lower than 120, the default follows it. Read when `start_computer` runs. |
 | `COMPUTER_USE_IDLE_TIMEOUT` | `1h` | Time without agent calls after which a session ends. Seconds (`90`) or a number with `s`, `m`, or `h` (`30m`, `2h`). Read when `start_computer` runs. |
+| `COMPUTER_USE_PORT_BASE` | `20900` | First of the 17 host ports the computer publishes on `127.0.0.1` (a port from 1024 to 65519). Applies at creation. |
 | `COMPUTER_USE_IMAGE` | Release builds use `ghcr.io/falleng0d/computer-use-mcp:<version>`. Dev builds use `computer-use-mcp:dev`. | Image used for the computer container. |
 
 Release builds pull their image when it is missing. Dev builds never pull, so a dev host binary is never paired with an old image by accident. Build the dev image with `just image`.
@@ -57,6 +58,23 @@ The server makes no Docker calls until an agent calls `start_computer`. That too
 `list_files`, `read_file`, and `write_file` take the session id and a path. Relative paths start at the session's working folder, `~` is home, and absolute paths work anywhere the user `computer` can reach. All sessions see the same files. `list_files` lists one folder (the working folder by default), folders first, with type, size, and modified time, and caps at 1000 entries. `read_file` returns UTF-8 text as text and PNG or JPEG files (up to 1 MB, found by their first bytes) as images. It refuses other binary files with a hint to use `shell`. Long text keeps its first and last 15000 bytes with a marker between them and a note, and the optional `offset` and `limit` (in lines, from 1) read a range. `write_file` replaces a file with UTF-8 content of up to 10 MB, creates missing folders, and writes atomically while keeping an existing file's permissions. It refuses a path that is a folder.
 
 Sessions end on their own, so a crashed or forgotten agent does not hold a screen. Each MCP server process sends a heartbeat every 10 s for all its sessions, and its sessions end 30 s after the last one, which covers a killed process. A session also ends after its idle time with no agent call. A running `shell` command counts as activity, so a long command never makes its own session idle. When the MCP server exits on stdin close, Ctrl+C, or SIGTERM, it ends its sessions at once, waiting at most 3 s. Ending a session closes its screen and frees its number. Files in home are never touched. A call on a session that ended on its own says why and asks the agent to call `start_computer` again.
+
+## Watching and using the screens
+
+`start_computer` returns a viewer link such as `http://127.0.0.1:20900/#key=ab3d5fgh`, and `computer-use-mcp info` prints it while the computer runs. The container logs print it at every start (`docker logs <name>`). Open it in a browser. The page lists every live session in a sidebar with its title, screen number, start time, and number of viewers, and updates as sessions start and end. Click a screen to connect to it. You have full control of the screen, and nothing coordinates you with the agent. The browser keeps the key in local storage and removes it from the address bar. The address bar keeps `#screen=<n>` so a link can open the page on one screen.
+
+Native VNC clients connect to `127.0.0.1` on the base port plus the screen number (`20901` to `20916` by default) and use the key as the password. macOS Screen Sharing works with `open vnc://:<key>@127.0.0.1:20901`. The key is 8 characters because classic VNC password authentication ignores everything after the 8th. `computerd` makes it on the first start with a fresh home and keeps it in home, so links stay valid across restarts.
+
+Ports published on `127.0.0.1` only:
+
+| Host port | Serves |
+| --- | --- |
+| base | Viewer page and its WebSocket bridge for noVNC (v1.7.0) |
+| base + 1 to base + 16 | Raw VNC for screens 1 to 16 |
+
+Every viewer goes through `computerd`, which checks the key, refuses page requests whose `Host` is not `127.0.0.1` or `localhost` on that port, and checks `Origin` on WebSocket upgrades. While a viewer is attached to a screen, the session's idle timer does not run. When a session ends while someone watches, it ends for the agent at once, but its screen stays open until the last viewer disconnects.
+
+The base port is a setting of the computer, read when the computer is created. Two computers on the same machine need different bases, for example `COMPUTER_USE_NAME=other COMPUTER_USE_PORT_BASE=21900`. If a port is taken, `start_computer` says which one and names the setting. A computer that already exists keeps its ports. Remove it with `docker rm` (home stays) to create it again with another base.
 
 ## Development
 

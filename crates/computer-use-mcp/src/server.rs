@@ -296,6 +296,25 @@ pub struct Server {
     start_lock: Arc<Mutex<()>>,
 }
 
+/// What `start_computer` hands back.
+struct Started {
+    session: SessionId,
+    /// Link that opens the viewer page, when the computer has one.
+    link: Option<String>,
+}
+
+impl Started {
+    fn describe(&self) -> String {
+        match &self.link {
+            Some(link) => format!(
+                "session: {}\nviewer: {link}\nThe viewer link opens a page where the user can watch and use every screen. Tell the user about it. The password in the link is private to the user.",
+                self.session
+            ),
+            None => format!("session: {}", self.session),
+        }
+    }
+}
+
 impl Server {
     pub fn from_env() -> Self {
         Self::new(
@@ -334,7 +353,7 @@ impl Server {
             .await
     }
 
-    async fn start(&self, title: &str) -> anyhow::Result<SessionId> {
+    async fn start(&self, title: &str) -> anyhow::Result<Started> {
         let title = SessionTitle::parse(title)?;
         let screen_size = self
             .screen_size
@@ -362,7 +381,16 @@ impl Server {
             )
             .await?;
         self.heartbeats.start(&endpoint);
-        Ok(session)
+        let link = match client.viewer().await {
+            Ok(info) => endpoint
+                .viewer_port
+                .map(|port| computer_protocol::viewer_link(port, &info.key)),
+            Err(error) => {
+                warn!(error = %format!("{error:#}"), "could not read the viewer link");
+                None
+            }
+        };
+        Ok(Started { session, link })
     }
 
     /// Ends every session this process started. Call before the process exits.
@@ -492,7 +520,7 @@ impl Server {
             .start(&args.title)
             .await
             .context("starting the computer")
-            .map(|session| format!("session: {session}"));
+            .map(|started| started.describe());
         report("start_computer", result)
     }
 
@@ -664,6 +692,7 @@ mod tests {
         let settings = Settings {
             name: name.clone(),
             timezone: Some("UTC".to_owned()),
+            port_base: Ok(crate::computer::free_port_base()),
         };
         let docker = Docker::connect_with_defaults().unwrap();
         let _cleanup = Cleanup {
@@ -679,7 +708,7 @@ mod tests {
             parse_idle(None),
         );
 
-        let first = server.start("first task").await.unwrap();
+        let first = server.start("first task").await.unwrap().session;
         server.end(first.as_str()).await.unwrap();
         let error = server.end(first.as_str()).await.unwrap_err();
         assert_eq!(error.to_string(), START_FIRST);
@@ -691,7 +720,7 @@ mod tests {
             START_FIRST
         );
 
-        let second = server.start("second task").await.unwrap();
+        let second = server.start("second task").await.unwrap().session;
         assert_ne!(first, second);
         server.end(second.as_str()).await.unwrap();
     }
@@ -703,6 +732,7 @@ mod tests {
         let settings = Settings {
             name: name.clone(),
             timezone: None,
+            port_base: Ok(crate::computer::free_port_base()),
         };
         let docker = Docker::connect_with_defaults().unwrap();
         let _cleanup = Cleanup {
@@ -718,7 +748,7 @@ mod tests {
             parse_idle(None),
         );
 
-        let session = server.start("leaving").await.unwrap();
+        let session = server.start("leaving").await.unwrap().session;
         server.observe(session.as_str()).await.unwrap();
         server.shutdown().await;
 
@@ -740,6 +770,7 @@ mod tests {
         let settings = Settings {
             name: name.clone(),
             timezone: None,
+            port_base: Ok(crate::computer::free_port_base()),
         };
         let docker = Docker::connect_with_defaults().unwrap();
         let _cleanup = Cleanup {
@@ -755,8 +786,8 @@ mod tests {
             parse_idle(None),
         );
 
-        let session = server.start("watcher").await.unwrap();
-        let other = server.start("other watcher").await.unwrap();
+        let session = server.start("watcher").await.unwrap().session;
+        let other = server.start("other watcher").await.unwrap().session;
         let content_len = |result: CallToolResult| result.content.len();
 
         let first = server.observe(session.as_str()).await.unwrap();
@@ -787,6 +818,7 @@ mod tests {
         let settings = Settings {
             name: name.clone(),
             timezone: None,
+            port_base: Ok(crate::computer::free_port_base()),
         };
         let docker = Docker::connect_with_defaults().unwrap();
         let _cleanup = Cleanup {
@@ -810,7 +842,7 @@ mod tests {
         );
 
         let (first, second) = tokio::join!(one.start("one"), two.start("two"));
-        assert_ne!(first.unwrap(), second.unwrap());
+        assert_ne!(first.unwrap().session, second.unwrap().session);
 
         let filters = HashMap::from([("name".to_owned(), vec![name])]);
         let options = ListContainersOptionsBuilder::new()
@@ -839,6 +871,7 @@ mod tests {
         let settings = Settings {
             name: name.clone(),
             timezone: None,
+            port_base: Ok(crate::computer::free_port_base()),
         };
         let docker = Docker::connect_with_defaults().unwrap();
         let _cleanup = Cleanup {
@@ -853,7 +886,7 @@ mod tests {
             Ok(ShellTimeouts::default()),
             parse_idle(None),
         );
-        let session = server.start("actor").await.unwrap();
+        let session = server.start("actor").await.unwrap().session;
 
         let menu = server
             .act(act_args(
@@ -935,6 +968,7 @@ mod tests {
         let settings = Settings {
             name: name.clone(),
             timezone: None,
+            port_base: Ok(crate::computer::free_port_base()),
         };
         let docker = Docker::connect_with_defaults().unwrap();
         let _cleanup = Cleanup {
@@ -950,7 +984,7 @@ mod tests {
             Ok(timeouts),
             parse_idle(None),
         );
-        let session = server.start("shell user").await.unwrap();
+        let session = server.start("shell user").await.unwrap().session;
         let run = |command: &'static str, timeout| {
             let args = shell_args(&session, command, timeout);
             async { server.run_shell(args).await.map(|result| text_of(&result)) }
@@ -1029,6 +1063,7 @@ none
         let settings = Settings {
             name: name.clone(),
             timezone: None,
+            port_base: Ok(crate::computer::free_port_base()),
         };
         let docker = Docker::connect_with_defaults().unwrap();
         let _cleanup = Cleanup {
@@ -1043,8 +1078,8 @@ none
             Ok(ShellTimeouts::default()),
             parse_idle(None),
         );
-        let writer = server.start("writer").await.unwrap();
-        let reader = server.start("reader").await.unwrap();
+        let writer = server.start("writer").await.unwrap().session;
+        let reader = server.start("reader").await.unwrap().session;
         let write = |session: &SessionId, path: &str, content: &str| {
             let args = serde_json::from_value(serde_json::json!({
                 "session": session.as_str(), "path": path, "content": content,
@@ -1146,5 +1181,161 @@ none
         let junk = secs(Some("2m"), None).unwrap_err();
         assert!(junk.starts_with("COMPUTER_USE_SHELL_TIMEOUT=2m"), "{junk}");
         assert!(secs(Some("0"), None).is_err());
+    }
+
+    /// A VNC connection after the version and security type exchange.
+    struct Rfb {
+        stream: tokio::net::TcpStream,
+        security_types: Vec<u8>,
+    }
+
+    /// DES response to a VNC authentication challenge. VNC bit-reverses every key byte.
+    fn vnc_response(password: &str, challenge: [u8; 16]) -> [u8; 16] {
+        use des::{
+            Des,
+            cipher::{BlockCipherEncrypt, KeyInit},
+        };
+        let mut key = [0u8; 8];
+        for (slot, byte) in key.iter_mut().zip(password.bytes()) {
+            *slot = byte.reverse_bits();
+        }
+        let cipher = Des::new(&key.into());
+        let mut out = [0u8; 16];
+        for (index, chunk) in challenge.chunks(8).enumerate() {
+            let mut block = <[u8; 8]>::try_from(chunk).unwrap().into();
+            cipher.encrypt_block(&mut block);
+            out[index * 8..index * 8 + 8].copy_from_slice(&block);
+        }
+        out
+    }
+
+    async fn rfb_connect(port: u16) -> Rfb {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let mut version = [0u8; 12];
+        stream.read_exact(&mut version).await.unwrap();
+        assert!(version.starts_with(b"RFB 003."));
+        stream
+            .write_all(
+                b"RFB 003.008
+",
+            )
+            .await
+            .unwrap();
+        let mut count = [0u8; 1];
+        stream.read_exact(&mut count).await.unwrap();
+        let mut security_types = vec![0u8; usize::from(count[0])];
+        stream.read_exact(&mut security_types).await.unwrap();
+        Rfb {
+            stream,
+            security_types,
+        }
+    }
+
+    /// Authenticates with VNC password auth and returns the security result (0 means accepted).
+    async fn rfb_authenticate(rfb: &mut Rfb, password: &str) -> u32 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        rfb.stream.write_all(&[2]).await.unwrap();
+        let mut challenge = [0u8; 16];
+        rfb.stream.read_exact(&mut challenge).await.unwrap();
+        let response = vnc_response(password, challenge);
+        rfb.stream.write_all(&response).await.unwrap();
+        let mut result = [0u8; 4];
+        rfb.stream.read_exact(&mut result).await.unwrap();
+        u32::from_be_bytes(result)
+    }
+
+    /// Sends `ClientInit` and returns the desktop size from `ServerInit`.
+    async fn rfb_size(rfb: &mut Rfb) -> (u16, u16) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        rfb.stream.write_all(&[1]).await.unwrap();
+        let mut init = [0u8; 4];
+        rfb.stream.read_exact(&mut init).await.unwrap();
+        (
+            u16::from_be_bytes([init[0], init[1]]),
+            u16::from_be_bytes([init[2], init[3]]),
+        )
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Docker"]
+    async fn native_vnc_clients_authenticate_on_the_screens_port_and_cannot_resize_it() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let name = format!("computer-use-test-{}", Uuid::new_v4().simple());
+        let port_base = crate::computer::free_port_base();
+        let settings = Settings {
+            name: name.clone(),
+            timezone: None,
+            port_base: Ok(port_base),
+        };
+        let docker = Docker::connect_with_defaults().unwrap();
+        let _cleanup = Cleanup {
+            docker,
+            name,
+            volume: settings.volume(),
+        };
+        let size = ScreenSize::parse("1024x768").unwrap();
+        let server = Server::new(
+            settings,
+            image::from_env(),
+            Ok(size),
+            Ok(ShellTimeouts::default()),
+            parse_idle(None),
+        );
+
+        let started = server.start("viewed").await.unwrap();
+        server.observe(started.session.as_str()).await.unwrap();
+        let link = started.link.expect("the computer has a viewer");
+        let key = link
+            .strip_prefix(&format!("http://127.0.0.1:{port_base}/#key="))
+            .expect("the link points at the published page port")
+            .to_owned();
+        assert_eq!(key.len(), 8);
+
+        let screen_port = port_base + 1;
+        let mut rfb = rfb_connect(screen_port).await;
+        assert_eq!(rfb.security_types, [2]);
+        assert_ne!(rfb_authenticate(&mut rfb, "wrongpwd").await, 0);
+
+        let mut rfb = rfb_connect(screen_port).await;
+        assert_eq!(rfb_authenticate(&mut rfb, &key).await, 0);
+        assert_eq!(rfb_size(&mut rfb).await, (1024, 768));
+        let mut name_len = [0u8; 20];
+        rfb.stream.read_exact(&mut name_len).await.unwrap();
+        let name_len = u32::from_be_bytes(name_len[16..20].try_into().unwrap());
+        let mut desktop_name = vec![0u8; name_len as usize];
+        rfb.stream.read_exact(&mut desktop_name).await.unwrap();
+
+        let mut resize = vec![2, 0, 0, 1];
+        resize.extend_from_slice(&(-308i32).to_be_bytes());
+        resize.extend_from_slice(&[251, 0, 2, 128, 1, 224, 1, 0]);
+        resize.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 2, 128, 1, 224, 0, 0, 0, 0]);
+        resize.extend_from_slice(&[3, 0, 0, 0, 0, 0, 4, 0, 3, 0]);
+        rfb.stream.write_all(&resize).await.unwrap();
+        let mut update = [0u8; 1];
+        tokio::time::timeout(Duration::from_secs(10), rfb.stream.read_exact(&mut update))
+            .await
+            .expect("the server answers the update request")
+            .unwrap();
+        assert_eq!(update[0], 0, "a FramebufferUpdate follows");
+
+        let mut again = rfb_connect(screen_port).await;
+        assert_eq!(rfb_authenticate(&mut again, &key).await, 0);
+        assert_eq!(rfb_size(&mut again).await, (1024, 768));
+
+        let mut closed = tokio::net::TcpStream::connect(("127.0.0.1", port_base + 7))
+            .await
+            .unwrap();
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(5), closed.read(&mut byte))
+            .await
+            .expect("a screen that is not open closes the connection");
+        assert!(matches!(read, Ok(0) | Err(_)));
     }
 }

@@ -68,18 +68,24 @@ pub struct Liveness {
     pub idle: Duration,
     /// An agent call is running on the session.
     pub call_running: bool,
+    /// Viewers attached to the session's screen.
+    pub viewers: usize,
 }
 
 /// Decides whether a session ends now.
 ///
 /// A silent owner ends the session even while a call runs. A running call counts as
-/// activity, so a long command never makes its own session idle.
+/// activity, so a long command never makes its own session idle. An attached viewer does
+/// too, so a session someone watches never ends for being idle.
 pub fn end_reason(l: &Liveness) -> Option<EndReason> {
     let owner_last = l.owner_seen.map_or(l.created, |seen| seen.max(l.created));
     if l.now.saturating_duration_since(owner_last) >= OWNER_TIMEOUT {
         return Some(EndReason::OwnerGone);
     }
-    if !l.call_running && l.now.saturating_duration_since(l.last_activity) >= l.idle {
+    if !l.call_running
+        && l.viewers == 0
+        && l.now.saturating_duration_since(l.last_activity) >= l.idle
+    {
         return Some(EndReason::Idle(l.idle));
     }
     None
@@ -103,6 +109,7 @@ mod tests {
             owner_seen: None,
             idle: IDLE,
             call_running: false,
+            viewers: 0,
         }
     }
 
@@ -157,6 +164,27 @@ mod tests {
             ..liveness(base, 7200)
         };
         assert_eq!(end_reason(&l), None);
+    }
+
+    #[test]
+    fn a_watched_session_never_goes_idle_but_a_silent_owner_still_ends_it() {
+        let base = Instant::now();
+        let watched = |now| Liveness {
+            owner_seen: Some(at(base, now - 1)),
+            viewers: 1,
+            ..liveness(base, now)
+        };
+        assert_eq!(end_reason(&watched(7200)), None);
+        let unwatched = Liveness {
+            viewers: 0,
+            ..watched(7200)
+        };
+        assert_eq!(end_reason(&unwatched), Some(EndReason::Idle(IDLE)));
+        let silent = Liveness {
+            owner_seen: None,
+            ..watched(7200)
+        };
+        assert_eq!(end_reason(&silent), Some(EndReason::OwnerGone));
     }
 
     #[test]

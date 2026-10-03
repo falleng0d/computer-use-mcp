@@ -10,9 +10,9 @@ use axum::{
 };
 use computer_protocol::{
     ActReply, ActRequest, ApiError, CreateSession, Health, ListFilesReply, ListFilesRequest,
-    Observation, OwnerId, PROTOCOL_VERSION, ReadFileReply, ReadFileRequest, SessionCreated,
-    SessionId, SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, VERSION, WriteFileReply,
-    WriteFileRequest,
+    Observation, OwnerId, PROTOCOL_VERSION, ReadFileReply, ReadFileRequest, SCREEN_COUNT,
+    SessionCreated, SessionId, SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, VERSION,
+    ViewerInfo, WriteFileReply, WriteFileRequest,
 };
 use tracing::error;
 use uuid::Uuid;
@@ -26,16 +26,20 @@ const MAX_WRITE_BODY_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone)]
 struct AppState {
     token: Arc<str>,
+    key: Arc<str>,
     sessions: Sessions,
 }
 
-pub fn router(token: String, sessions: Sessions) -> Router {
+pub fn router(token: String, key: String, sessions: Sessions) -> Router {
     let state = AppState {
         token: token.into(),
+        key: key.into(),
         sessions,
     };
     Router::new()
         .route("/health", get(health))
+        .route("/viewer", get(viewer))
+        .route("/viewer/show/{screen}", post(show_screen))
         .route("/sessions", post(create_session))
         .route("/sessions/{id}", delete(end_session))
         .route("/owners/{owner}", delete(end_owner))
@@ -78,6 +82,27 @@ async fn health() -> Json<Health> {
         protocol_version: PROTOCOL_VERSION,
         version: VERSION.to_owned(),
     })
+}
+
+async fn viewer(State(state): State<AppState>) -> Json<ViewerInfo> {
+    Json(ViewerInfo {
+        key: state.key.to_string(),
+        pages: state.sessions.hub().pages(),
+    })
+}
+
+/// Asks every open viewer page to switch to a screen. The reply says how many pages are open.
+async fn show_screen(
+    State(state): State<AppState>,
+    Path(screen): Path<u8>,
+) -> Result<Json<ViewerInfo>, StatusCode> {
+    if !(1..=SCREEN_COUNT).contains(&screen) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(Json(ViewerInfo {
+        key: state.key.to_string(),
+        pages: state.sessions.hub().show(screen),
+    }))
 }
 
 async fn create_session(
@@ -190,6 +215,7 @@ mod tests {
     use super::*;
 
     const TOKEN: &str = "secret";
+    const KEY: &str = "abcd2345";
 
     async fn send(
         app: &Router,
@@ -216,7 +242,7 @@ mod tests {
 
     #[tokio::test]
     async fn requests_without_the_right_token_are_refused() {
-        let app = router(TOKEN.to_owned(), Sessions::default());
+        let app = router(TOKEN.to_owned(), KEY.to_owned(), Sessions::default());
         let health = |token| send(&app, "GET", "/health", token, "");
         assert_eq!(health(None).await.0, StatusCode::UNAUTHORIZED);
         assert_eq!(health(Some("secreT")).await.0, StatusCode::UNAUTHORIZED);
@@ -226,7 +252,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_session_can_be_ended_once() {
-        let app = router(TOKEN.to_owned(), Sessions::default());
+        let app = router(TOKEN.to_owned(), KEY.to_owned(), Sessions::default());
         let (status, body) = send(
             &app,
             "POST",
@@ -246,7 +272,7 @@ mod tests {
 
     #[tokio::test]
     async fn observing_an_ended_session_is_not_found() {
-        let app = router(TOKEN.to_owned(), Sessions::default());
+        let app = router(TOKEN.to_owned(), KEY.to_owned(), Sessions::default());
         let uri = format!("/sessions/{}/observe", "0".repeat(32));
         assert_eq!(
             send(&app, "POST", &uri, Some(TOKEN), "").await.0,
@@ -256,7 +282,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_blank_title_is_rejected() {
-        let app = router(TOKEN.to_owned(), Sessions::default());
+        let app = router(TOKEN.to_owned(), KEY.to_owned(), Sessions::default());
         let (status, _) = send(
             &app,
             "POST",
