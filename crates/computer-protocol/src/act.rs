@@ -26,12 +26,21 @@ pub const DEFAULT_SCROLL_AMOUNT: u8 = 3;
 pub const MAX_SCROLL_AMOUNT: u8 = 20;
 
 /// Most characters all `type` actions of one batch may hold together.
-pub const MAX_TYPE_CHARS: usize = 5000;
+pub const MAX_TYPE_CHARS: usize = 1000;
 
 /// Time `computerd` may spend on top of the waits and typing of a batch before giving up.
 const WORK_ALLOWANCE: Duration = Duration::from_secs(30);
 
-const TYPE_CHAR_ALLOWANCE: Duration = Duration::from_millis(20);
+/// Time applications get to reread the keyboard after a temporary key binding changes.
+pub const KEYMAP_SETTLE: Duration = Duration::from_millis(20);
+
+/// Allowance for the X round trips behind one typed character.
+const ROUND_TRIP_ALLOWANCE: Duration = Duration::from_millis(10);
+
+/// Time one typed character may take: it can need its own binding, which costs two settle pauses.
+const TYPE_CHAR_ALLOWANCE: Duration = KEYMAP_SETTLE
+    .saturating_mul(2)
+    .saturating_add(ROUND_TRIP_ALLOWANCE);
 
 /// Mouse button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -582,7 +591,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             request.time_budget(),
-            Duration::from_millis(30_000 + 500 + 1000 + 100)
+            Duration::from_millis(30_000 + 500 + 1000 + 5 * 50)
         );
     }
 
@@ -596,5 +605,19 @@ mod tests {
         .unwrap();
         let json = serde_json::to_string(&request).unwrap();
         assert_eq!(serde_json::from_str::<ActRequest>(&json).unwrap(), request);
+    }
+
+    #[test]
+    fn typing_budget_covers_a_binding_pause_for_every_character() {
+        let chars = MAX_TYPE_CHARS;
+        let request = ActRequest {
+            actions: vec![Action::Type {
+                text: "あ".repeat(chars),
+            }],
+            observe: false,
+            settle_ms: 0,
+        };
+        let per_char = KEYMAP_SETTLE * 2 + Duration::from_millis(10);
+        assert!(request.time_budget() >= WORK_ALLOWANCE + per_char * u32::try_from(chars).unwrap());
     }
 }

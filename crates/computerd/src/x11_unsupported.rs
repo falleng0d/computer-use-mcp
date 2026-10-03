@@ -38,6 +38,14 @@ impl Capturer {
         bail!("screens need Linux")
     }
 
+    pub fn check_keys(&self, _inputs: &[Input]) -> Result<()> {
+        bail!("screens need Linux")
+    }
+
+    pub fn release_held(&self) -> Result<()> {
+        bail!("screens need Linux")
+    }
+
     pub fn windows(&self) -> Result<Vec<WindowInfo>> {
         bail!("screens need Linux")
     }

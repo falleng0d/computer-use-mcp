@@ -19,6 +19,8 @@ pub enum Outcome {
 pub struct LoopGuard {
     last: Vec<Action>,
     unchanged: u8,
+    /// Id of the frame the last counted batch left unchanged.
+    frame: Option<u64>,
 }
 
 /// Batches of scroll, pointer, and key actions, with waits. Typing or focusing
@@ -34,6 +36,13 @@ fn is_countable(batch: &[Action]) -> bool {
 }
 
 impl LoopGuard {
+    /// Forgets the count when the screen changed on its own since the last batch.
+    pub fn sync(&mut self, frame: u64) {
+        if self.frame != Some(frame) {
+            self.reset();
+        }
+    }
+
     /// Whether `batch` is the one repeated [`MAX_UNCHANGED_REPEATS`] times already.
     /// Returns how many times it ran when it must be refused.
     pub fn refusal(&self, batch: &[Action]) -> Option<u8> {
@@ -42,7 +51,8 @@ impl LoopGuard {
     }
 
     /// Records a batch that ran.
-    pub fn record(&mut self, batch: &[Action], outcome: Outcome) {
+    pub fn record(&mut self, batch: &[Action], outcome: Outcome, frame: u64) {
+        self.frame = Some(frame);
         if outcome != Outcome::Unchanged || !is_countable(batch) {
             self.reset();
         } else if self.last == batch {
@@ -57,6 +67,7 @@ impl LoopGuard {
     pub fn reset(&mut self) {
         self.last.clear();
         self.unchanged = 0;
+        self.frame = None;
     }
 }
 
@@ -88,9 +99,10 @@ mod tests {
     }
 
     fn run(guard: &mut LoopGuard, batch: &[Action], outcome: Outcome) -> bool {
+        guard.sync(1);
         let refused = guard.refusal(batch).is_some();
         if !refused {
-            guard.record(batch, outcome);
+            guard.record(batch, outcome, 1);
         }
         refused
     }
@@ -126,6 +138,16 @@ mod tests {
             }
             assert!(run(&mut guard, &scroll(), Outcome::Unchanged));
         }
+    }
+
+    #[test]
+    fn a_screen_that_changed_on_its_own_between_batches_restarts_the_count() {
+        let mut guard = LoopGuard::default();
+        for _ in 0..3 {
+            assert!(!run(&mut guard, &scroll(), Outcome::Unchanged));
+        }
+        guard.sync(2);
+        assert!(guard.refusal(&scroll()).is_none());
     }
 
     #[test]

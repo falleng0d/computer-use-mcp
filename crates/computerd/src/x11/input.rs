@@ -1,9 +1,9 @@
 //! Mouse, keyboard, and window focus through XTEST and the window manager.
 
-use std::{thread::sleep, time::Duration};
+use std::thread::sleep;
 
 use anyhow::{Context, Result};
-use computer_protocol::{Button, Direction, Point};
+use computer_protocol::{Button, Direction, Point, act::KEYMAP_SETTLE};
 use x11rb::{
     connection::Connection as _,
     protocol::{
@@ -17,14 +17,11 @@ use x11rb::{
 
 use super::Capturer;
 use crate::{
-    keys::{self, Keymap},
+    keys::{self, Keymap, Segment, Tap},
     plan::{Edge, Input, WindowInfo},
 };
 
 const NO_SYMBOL: u32 = 0;
-
-/// Time for applications to reread the keyboard after a temporary binding changes.
-const KEYMAP_SETTLE: Duration = Duration::from_millis(20);
 
 /// Source indication for `_NET_ACTIVE_WINDOW`: a request from a pager, which window managers always honor.
 const SOURCE_PAGER: u32 = 2;
@@ -107,7 +104,12 @@ impl Capturer {
             Edge::Press => BUTTON_PRESS_EVENT,
             Edge::Release => BUTTON_RELEASE_EVENT,
         };
-        self.fake(kind, code, 0, 0)
+        self.fake(kind, code, 0, 0)?;
+        match edge {
+            Edge::Press => self.held_buttons.borrow_mut().insert(code),
+            Edge::Release => self.held_buttons.borrow_mut().remove(&code),
+        };
+        Ok(())
     }
 
     fn key_edge(&self, keycode: u8, edge: Edge) -> Result<()> {
@@ -158,58 +160,89 @@ impl Capturer {
         typed.and(released).and_then(|()| self.sync())
     }
 
-    /// Taps each keysym. A keysym with no key is bound to a spare keycode just for its tap,
-    /// and the spare keycode is cleared again at the end.
+    /// Taps each keysym. Keysyms with no key are bound to spare keycodes a segment at a
+    /// time, and the spare keycodes are cleared again after each segment.
     fn tap_all(&self, keymap: &Keymap, keysyms: &[u32]) -> Result<()> {
-        let mut bound: Option<(u8, u32)> = None;
-        let typed = self.tap_each(keymap, keysyms, &mut bound);
-        let cleared = match bound {
-            Some((keycode, _)) => self.bind(keycode, NO_SYMBOL).and_then(|()| self.sync()),
-            None => Ok(()),
-        };
-        typed.and(cleared)
+        let shift = keymap.find(keys::SHIFT_L).map(|press| press.keycode);
+        for segment in keys::segments(keymap, keysyms)? {
+            let tapped = self.tap_segment(&segment, shift);
+            let cleared = self.clear_bindings(&segment);
+            tapped.and(cleared)?;
+        }
+        Ok(())
     }
 
-    fn tap_each(
-        &self,
-        keymap: &Keymap,
-        keysyms: &[u32],
-        bound: &mut Option<(u8, u32)>,
-    ) -> Result<()> {
-        let shift = keymap.find(keys::SHIFT_L).map(|press| press.keycode);
-        for &keysym in keysyms {
-            if let Some(press) = keymap.find(keysym) {
-                let shift_key = shift.filter(|_| press.shift);
-                if let Some(shift_key) = shift_key {
-                    self.key_edge(shift_key, Edge::Press)?;
-                }
-                self.key_edge(press.keycode, Edge::Press)?;
-                self.key_edge(press.keycode, Edge::Release)?;
-                if let Some(shift_key) = shift_key {
-                    self.key_edge(shift_key, Edge::Release)?;
-                }
-                continue;
+    fn tap_segment(&self, segment: &Segment, shift: Option<u8>) -> Result<()> {
+        if !segment.bindings.is_empty() {
+            for (keycode, keysym) in &segment.bindings {
+                self.bind(*keycode, *keysym)?;
             }
-            let keycode = match *bound {
-                Some((keycode, current)) if current == keysym => keycode,
-                _ => {
-                    let keycode = bound
-                        .map(|(keycode, _)| keycode)
-                        .or_else(|| keymap.spare())
-                        .context("the keyboard has no free key to type this character with")?;
-                    self.bind(keycode, keysym)?;
-                    self.sync()?;
-                    sleep(KEYMAP_SETTLE);
-                    *bound = Some((keycode, keysym));
-                    keycode
-                }
-            };
-            self.key_edge(keycode, Edge::Press)?;
-            self.key_edge(keycode, Edge::Release)?;
             self.sync()?;
             sleep(KEYMAP_SETTLE);
         }
+        for tap in &segment.taps {
+            match tap {
+                Tap::Key(press) => self.tap_key(press.keycode, shift.filter(|_| press.shift))?,
+                Tap::Bound(keycode) => self.tap_key(*keycode, None)?,
+            }
+        }
+        self.sync()
+    }
+
+    /// Presses and releases `keycode` with `shift` held. Shift is released even when the tap fails.
+    fn tap_key(&self, keycode: u8, shift: Option<u8>) -> Result<()> {
+        if let Some(shift) = shift {
+            self.key_edge(shift, Edge::Press)?;
+        }
+        let tapped = self
+            .key_edge(keycode, Edge::Press)
+            .and_then(|()| self.key_edge(keycode, Edge::Release));
+        let released = shift.map_or(Ok(()), |shift| self.key_edge(shift, Edge::Release));
+        tapped.and(released)
+    }
+
+    fn clear_bindings(&self, segment: &Segment) -> Result<()> {
+        if segment.bindings.is_empty() {
+            return Ok(());
+        }
+        sleep(KEYMAP_SETTLE);
+        for (keycode, _) in &segment.bindings {
+            self.bind(*keycode, NO_SYMBOL)?;
+        }
+        self.sync()
+    }
+
+    /// Fails when `inputs` hold a key or modifier the keyboard cannot produce, so the
+    /// batch can be refused before any of it runs.
+    pub fn check_keys(&self, inputs: &[Input]) -> Result<()> {
+        let keymap = self.keymap()?;
+        for input in inputs {
+            match input {
+                Input::Type(keysyms) => {
+                    keys::segments(&keymap, keysyms)?;
+                }
+                Input::Key { keysym, modifiers } => {
+                    keys::segments(&keymap, &[*keysym])?;
+                    for modifier in modifiers {
+                        keymap
+                            .find(*modifier)
+                            .context("the keyboard has no key for that modifier")?;
+                    }
+                }
+                _ => {}
+            }
+        }
         Ok(())
+    }
+
+    /// Releases every mouse button that an earlier input pressed and did not release.
+    pub fn release_held(&self) -> Result<()> {
+        let held: Vec<u8> = self.held_buttons.borrow().iter().copied().collect();
+        let mut result = Ok(());
+        for code in held {
+            result = result.and(self.button(code, Edge::Release));
+        }
+        result.and_then(|()| self.sync())
     }
 
     /// Asks the window manager to raise and focus `window`.

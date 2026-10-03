@@ -142,13 +142,73 @@ impl Keymap {
         None
     }
 
-    /// The highest keycode with no keysyms, free to bind temporarily.
-    pub fn spare(&self) -> Option<u8> {
-        self.rows()
+    /// Keycodes with no keysyms, highest first. They are free to bind temporarily.
+    pub fn spares(&self) -> Vec<u8> {
+        let mut spares: Vec<u8> = self
+            .rows()
             .filter(|(_, row)| row.iter().all(|keysym| *keysym == 0))
             .map(|(keycode, _)| keycode)
-            .last()
+            .collect();
+        spares.reverse();
+        spares
     }
+}
+
+/// Most keysyms bound at once, so one pause covers many characters.
+const MAX_BINDINGS: usize = 32;
+
+/// How to produce one keysym.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tap {
+    /// A key the keyboard already has.
+    Key(KeyPress),
+    /// A spare keycode bound to the keysym for the length of its segment.
+    Bound(u8),
+}
+
+/// Keysyms typed under one set of temporary bindings.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Segment {
+    pub bindings: Vec<(u8, u32)>,
+    pub taps: Vec<Tap>,
+}
+
+/// The keyboard has no spare keycode to type a character with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the keyboard has no free key to type characters it lacks")]
+pub struct NoSpareKey;
+
+/// Splits `keysyms` into segments, each needing at most [`MAX_BINDINGS`] temporary bindings.
+pub fn segments(keymap: &Keymap, keysyms: &[u32]) -> Result<Vec<Segment>, NoSpareKey> {
+    let mut spares = keymap.spares();
+    spares.truncate(MAX_BINDINGS);
+    let mut done = Vec::new();
+    let mut current = Segment::default();
+    for &keysym in keysyms {
+        if let Some(press) = keymap.find(keysym) {
+            current.taps.push(Tap::Key(press));
+            continue;
+        }
+        let existing = current.bindings.iter().find(|(_, bound)| *bound == keysym);
+        let keycode = if let Some((keycode, _)) = existing {
+            *keycode
+        } else {
+            if current.bindings.len() == spares.len() {
+                if spares.is_empty() {
+                    return Err(NoSpareKey);
+                }
+                done.push(std::mem::take(&mut current));
+            }
+            let keycode = spares[current.bindings.len()];
+            current.bindings.push((keycode, keysym));
+            keycode
+        };
+        current.taps.push(Tap::Bound(keycode));
+    }
+    if !current.taps.is_empty() {
+        done.push(current);
+    }
+    Ok(done)
 }
 
 #[cfg(test)]
@@ -236,8 +296,45 @@ mod tests {
     }
 
     #[test]
-    fn spare_is_the_highest_empty_keycode() {
-        assert_eq!(keymap().spare(), Some(11));
-        assert_eq!(Keymap::new(8, 2, vec![1, 0, 2, 0]).spare(), None);
+    fn spares_list_empty_keycodes_highest_first() {
+        assert_eq!(keymap().spares(), vec![11]);
+        assert_eq!(
+            Keymap::new(8, 2, vec![1, 0, 2, 0]).spares(),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn unbound_characters_share_bindings_and_overflow_into_new_segments() {
+        // two spare keycodes: 10 and 9
+        let keymap = Keymap::new(8, 2, vec![0x61, 0x41, 0, 0, 0, 0]);
+        let kana = [0x0100_3042, 0x0100_3044, 0x0100_3042, 0x61, 0x0100_3046];
+        let planned = segments(&keymap, &kana).unwrap();
+        assert_eq!(
+            planned,
+            vec![
+                Segment {
+                    bindings: vec![(10, 0x0100_3042), (9, 0x0100_3044)],
+                    taps: vec![
+                        Tap::Bound(10),
+                        Tap::Bound(9),
+                        Tap::Bound(10),
+                        Tap::Key(KeyPress {
+                            keycode: 8,
+                            shift: false
+                        }),
+                    ],
+                },
+                Segment {
+                    bindings: vec![(10, 0x0100_3046)],
+                    taps: vec![Tap::Bound(10)],
+                },
+            ]
+        );
+        assert_eq!(segments(&keymap, &[0x61]).unwrap().len(), 1);
+        assert_eq!(segments(&keymap, &[]), Ok(vec![]));
+        let full = Keymap::new(8, 2, vec![1, 0]);
+        assert_eq!(segments(&full, &[0x0100_3042]), Err(NoSpareKey));
+        assert!(segments(&full, &[1]).is_ok());
     }
 }

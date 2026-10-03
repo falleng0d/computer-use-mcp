@@ -17,7 +17,7 @@ use tracing::{info, warn};
 use crate::{
     frames::{self, FrameTracker},
     guard::{LoopGuard, Outcome},
-    plan::{self, Step},
+    plan::{self, Input, Step},
     x11::Capturer,
 };
 
@@ -299,21 +299,32 @@ impl Screen {
     /// Nothing runs when the batch is invalid or repeats a batch that already changed nothing.
     pub async fn act(&mut self, request: ActRequest) -> Result<ActReply, ScreenError> {
         let steps = plan::plan(&request.actions, self.size).map_err(ScreenError::Rejected)?;
+        let inputs: Vec<Input> = steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Input(input) => Some(input.clone()),
+                _ => None,
+            })
+            .collect();
+        self.check_keys(inputs).await?;
+        let before = self.frame_id().await?;
+        self.guard.sync(before);
         if let Some(count) = self.guard.refusal(&request.actions) {
             return Err(ScreenError::Rejected(format!(
                 "this exact batch already ran {count} times in a row and the screen did not change, so it was not run again. The latest screenshot is still current. Change your approach: aim at a different target, use the keyboard, or check which window is in front."
             )));
         }
-        let before = self.frame_id().await?;
         let total = steps.len();
         for (index, step) in steps.into_iter().enumerate() {
             if let Err(error) = self.run_step(step).await {
                 self.guard.reset();
+                self.release_held().await;
                 return Err(error.at_step(index + 1, total));
             }
         }
         if !request.observe {
-            self.guard.record(&request.actions, Outcome::Unknown);
+            self.guard
+                .record(&request.actions, Outcome::Unknown, before);
             return Ok(ActReply {
                 actions_run: total,
                 observation: None,
@@ -326,11 +337,43 @@ impl Screen {
         } else {
             Outcome::Changed
         };
-        self.guard.record(&request.actions, outcome);
+        self.guard
+            .record(&request.actions, outcome, observation.frame_id);
         Ok(ActReply {
             actions_run: total,
             observation: Some(observation),
         })
+    }
+
+    /// Refuses a batch the keyboard cannot type before any of it runs.
+    async fn check_keys(&self, inputs: Vec<Input>) -> Result<(), ScreenError> {
+        let source = Arc::clone(&self.source);
+        tokio::task::spawn_blocking(move || {
+            source
+                .lock()
+                .expect("the capture lock is only held inside spawn_blocking")
+                .capturer
+                .check_keys(&inputs)
+        })
+        .await
+        .context("checking the keyboard")?
+        .map_err(|error| ScreenError::Rejected(format!("{error:#}")))
+    }
+
+    /// Releases mouse buttons a failed batch left pressed.
+    async fn release_held(&self) {
+        let source = Arc::clone(&self.source);
+        let released = tokio::task::spawn_blocking(move || {
+            source
+                .lock()
+                .expect("the capture lock is only held inside spawn_blocking")
+                .capturer
+                .release_held()
+        })
+        .await;
+        if let Ok(Err(error)) | Err(error) = released.map_err(anyhow::Error::from) {
+            warn!(error = %format!("{error:#}"), "could not release held buttons");
+        }
     }
 
     /// Id of the frame the screen shows now, without taking an image.
@@ -356,11 +399,14 @@ impl Screen {
             }
             Step::Input(input) => {
                 tokio::task::spawn_blocking(move || {
-                    source
+                    let guard = source
                         .lock()
-                        .expect("the capture lock is only held inside spawn_blocking")
-                        .capturer
-                        .perform(&input)
+                        .expect("the capture lock is only held inside spawn_blocking");
+                    let performed = guard.capturer.perform(&input);
+                    if performed.is_err() {
+                        let _ = guard.capturer.release_held();
+                    }
+                    performed
                 })
                 .await
                 .context("running the action")??;

@@ -11,8 +11,8 @@ use crate::computer::Endpoint;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(40);
-/// Time on top of the batch's own budget for the HTTP round trip.
-const ACT_MARGIN: Duration = Duration::from_secs(10);
+/// Time on top of the batch's own budget for the HTTP round trip and for waiting behind another batch of the session.
+const ACT_MARGIN: Duration = Duration::from_secs(120);
 const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const HEALTH_DEADLINE: Duration = Duration::from_secs(60);
 const HEALTH_RETRY: Duration = Duration::from_millis(250);

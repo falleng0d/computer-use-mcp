@@ -1,5 +1,7 @@
 //! One X display: pixels over MIT-SHM, damage, pointer, the focused window title, and input over XTEST.
 
+use std::{cell::RefCell, collections::BTreeSet};
+
 use anyhow::{Context, Result, bail, ensure};
 use computer_protocol::{Cursor, ScreenSize};
 use x11rb::{
@@ -28,6 +30,7 @@ pub struct Capturer {
     shm_seg: shm::Seg,
     segment: Segment,
     atoms: Atoms,
+    held_buttons: RefCell<BTreeSet<u8>>,
 }
 
 struct Atoms {
@@ -115,6 +118,7 @@ impl Capturer {
             shm_seg,
             segment,
             atoms,
+            held_buttons: RefCell::default(),
         })
     }
 
