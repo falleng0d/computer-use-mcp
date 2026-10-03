@@ -85,10 +85,67 @@ pub struct CreateSession {
     pub title: SessionTitle,
 }
 
+/// Length of a session id, in hex digits.
+pub const SESSION_ID_LEN: usize = 32;
+
+/// The id `computerd` issues for a session: 32 lowercase hex digits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SessionId(String);
+
+/// The text is not a session id.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("not a session id")]
+pub struct SessionIdError;
+
+impl SessionId {
+    /// Checks that the text has the format `computerd` issues.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the text is not exactly 32 lowercase hex digits.
+    pub fn parse(text: &str) -> Result<Self, SessionIdError> {
+        let valid = text.len() == SESSION_ID_LEN
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if valid {
+            Ok(Self(text.to_owned()))
+        } else {
+            Err(SessionIdError)
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for SessionId {
+    type Error = SessionIdError;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::parse(&text)
+    }
+}
+
+impl From<SessionId> for String {
+    fn from(id: SessionId) -> Self {
+        id.0
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Reply to `POST /sessions`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionCreated {
-    pub session: String,
+    pub session: SessionId,
 }
 
 #[cfg(test)]
@@ -109,6 +166,22 @@ mod tests {
             Err(TitleError::TooLong(MAX_TITLE_CHARS + 1))
         );
         assert_eq!(SessionTitle::parse(" \t"), Err(TitleError::Empty));
+    }
+
+    #[test]
+    fn session_ids_must_be_exactly_32_lowercase_hex_digits() {
+        let good = "0123456789abcdef0123456789abcdef";
+        assert_eq!(SessionId::parse(good).unwrap().as_str(), good);
+        for bad in [
+            "",
+            "../health",
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdef0",
+            "0123456789ABCDEF0123456789abcdef",
+            "0123456789abcdef0123456789abcde/",
+        ] {
+            assert_eq!(SessionId::parse(bad), Err(SessionIdError), "{bad}");
+        }
     }
 
     #[test]

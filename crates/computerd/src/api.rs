@@ -12,7 +12,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use computer_protocol::{
-    CreateSession, Health, PROTOCOL_VERSION, SessionCreated, SessionTitle, VERSION,
+    CreateSession, Health, PROTOCOL_VERSION, SessionCreated, SessionId, SessionTitle, VERSION,
 };
 use tracing::info;
 use uuid::Uuid;
@@ -27,7 +27,7 @@ struct Session {
 #[derive(Clone)]
 struct AppState {
     token: Arc<str>,
-    sessions: Arc<Mutex<HashMap<String, Session>>>,
+    sessions: Arc<Mutex<HashMap<SessionId, Session>>>,
 }
 
 pub fn router(token: String) -> Router {
@@ -73,7 +73,8 @@ async fn create_session(
     State(state): State<AppState>,
     Json(request): Json<CreateSession>,
 ) -> (StatusCode, Json<SessionCreated>) {
-    let id = Uuid::new_v4().simple().to_string();
+    let id = SessionId::parse(&Uuid::new_v4().simple().to_string())
+        .expect("a simple UUID is 32 lowercase hex digits");
     info!(session = %id, title = request.title.as_str(), "session started");
     let session = Session {
         title: request.title,
@@ -86,7 +87,7 @@ async fn create_session(
     (StatusCode::CREATED, Json(SessionCreated { session: id }))
 }
 
-async fn end_session(State(state): State<AppState>, Path(id): Path<String>) -> StatusCode {
+async fn end_session(State(state): State<AppState>, Path(id): Path<SessionId>) -> StatusCode {
     let removed = state
         .sessions
         .lock()

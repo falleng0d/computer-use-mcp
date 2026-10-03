@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use computer_protocol::SessionTitle;
+use computer_protocol::{SessionId, SessionTitle};
 use rmcp::{handler::server::wrapper::Parameters, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use tokio::sync::{Mutex, OnceCell};
@@ -57,7 +57,7 @@ impl Server {
             .await
     }
 
-    async fn start(&self, title: &str) -> anyhow::Result<String> {
+    async fn start(&self, title: &str) -> anyhow::Result<SessionId> {
         let title = SessionTitle::parse(title)?;
         let docked = self.docked().await?;
         let endpoint = {
@@ -70,22 +70,20 @@ impl Server {
     }
 
     /// Client for the running computer, or the `START_FIRST` error.
-    async fn client_for(&self, session: &str) -> anyhow::Result<Client> {
-        if session.is_empty() {
-            anyhow::bail!(START_FIRST);
-        }
+    async fn client_for(&self, session: &str) -> anyhow::Result<(SessionId, Client)> {
+        let session = SessionId::parse(session).map_err(|_| anyhow::anyhow!(START_FIRST))?;
         let endpoint = self
             .docked()
             .await?
             .running_endpoint()
             .await?
             .ok_or_else(|| anyhow::anyhow!(START_FIRST))?;
-        Client::new(&endpoint)
+        Ok((session, Client::new(&endpoint)?))
     }
 
     async fn end(&self, session: &str) -> anyhow::Result<()> {
-        let client = self.client_for(session).await?;
-        match client.end_session(session).await {
+        let (session, client) = self.client_for(session).await?;
+        match client.end_session(&session).await {
             Err(error) if error.is::<UnknownSession>() => anyhow::bail!(START_FIRST),
             other => other,
         }
@@ -144,9 +142,14 @@ impl rmcp::ServerHandler for Server {}
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use bollard::{
         Docker,
-        query_parameters::{RemoveContainerOptionsBuilder, StopContainerOptionsBuilder},
+        query_parameters::{
+            ListContainersOptionsBuilder, RemoveContainerOptionsBuilder,
+            StopContainerOptionsBuilder,
+        },
     };
 
     use uuid::Uuid;
@@ -200,8 +203,8 @@ mod tests {
         let server = Server::new(settings, image::from_env());
 
         let first = server.start("first task").await.unwrap();
-        server.end(&first).await.unwrap();
-        let error = server.end(&first).await.unwrap_err();
+        server.end(first.as_str()).await.unwrap();
+        let error = server.end(first.as_str()).await.unwrap_err();
         assert_eq!(error.to_string(), START_FIRST);
 
         let stop = StopContainerOptionsBuilder::new().t(1).build();
@@ -213,6 +216,37 @@ mod tests {
 
         let second = server.start("second task").await.unwrap();
         assert_ne!(first, second);
-        server.end(&second).await.unwrap();
+        server.end(second.as_str()).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Docker"]
+    async fn two_processes_starting_a_fresh_computer_share_one_container() {
+        let name = format!("computer-use-test-{}", Uuid::new_v4().simple());
+        let settings = Settings {
+            name: name.clone(),
+            timezone: None,
+        };
+        let docker = Docker::connect_with_defaults().unwrap();
+        let _cleanup = Cleanup {
+            docker: docker.clone(),
+            name: name.clone(),
+            volume: settings.volume(),
+        };
+        let one = Server::new(settings.clone(), image::from_env());
+        let two = Server::new(settings, image::from_env());
+
+        let (first, second) = tokio::join!(one.start("one"), two.start("two"));
+        assert_ne!(first.unwrap(), second.unwrap());
+
+        let filters = HashMap::from([("name".to_owned(), vec![name])]);
+        let options = ListContainersOptionsBuilder::new()
+            .all(true)
+            .filters(&filters)
+            .build();
+        assert_eq!(
+            docker.list_containers(Some(options)).await.unwrap().len(),
+            1
+        );
     }
 }

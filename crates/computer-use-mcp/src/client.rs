@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use computer_protocol::{
-    CreateSession, Health, PROTOCOL_VERSION, SessionCreated, SessionTitle, VERSION,
+    CreateSession, Health, PROTOCOL_VERSION, SessionCreated, SessionId, SessionTitle, VERSION,
 };
 use reqwest::StatusCode;
 
@@ -74,7 +74,7 @@ impl Client {
         })
     }
 
-    pub async fn create_session(&self, title: SessionTitle) -> Result<String> {
+    pub async fn create_session(&self, title: SessionTitle) -> Result<SessionId> {
         let created: SessionCreated = self
             .http
             .post(format!("{}/sessions", self.base))
@@ -92,7 +92,7 @@ impl Client {
     }
 
     /// Ends a session. Fails with [`UnknownSession`] when `computerd` does not know it.
-    pub async fn end_session(&self, session: &str) -> Result<()> {
+    pub async fn end_session(&self, session: &SessionId) -> Result<()> {
         let response = self
             .http
             .delete(format!("{}/sessions/{session}", self.base))

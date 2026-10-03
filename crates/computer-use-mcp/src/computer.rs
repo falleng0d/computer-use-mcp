@@ -25,6 +25,8 @@ const SHM_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 const PIDS_LIMIT: i64 = 4096;
 const LOOPBACK: &str = "127.0.0.1";
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(30);
+const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(15);
+const ENDPOINT_RETRY: Duration = Duration::from_millis(250);
 const PULL_TIMEOUT: Duration = Duration::from_mins(15);
 
 /// Names and host facts used when the computer is created.
@@ -159,16 +161,22 @@ where
     }
 }
 
-fn is_not_found(error: &anyhow::Error) -> bool {
+fn has_status(error: &anyhow::Error, wanted: u16) -> bool {
     error.chain().any(|cause| {
         matches!(
             cause.downcast_ref::<bollard::errors::Error>(),
-            Some(bollard::errors::Error::DockerResponseServerError {
-                status_code: 404,
-                ..
-            })
+            Some(bollard::errors::Error::DockerResponseServerError { status_code, .. })
+                if *status_code == wanted
         )
     })
+}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    has_status(error, 404)
+}
+
+fn is_conflict(error: &anyhow::Error) -> bool {
+    has_status(error, 409)
 }
 
 /// Docker side of the computer: creates it, starts it, and finds its endpoint.
@@ -236,11 +244,44 @@ impl Docked {
             }
             Plan::Create => self.create().await?,
         }
-        let inspect = self
-            .inspect()
-            .await?
-            .ok_or_else(|| anyhow!("the computer container `{name}` disappeared"))?;
-        endpoint_from(&inspect)
+        self.wait_for_endpoint().await
+    }
+
+    /// Docker reserves the name before the container can be inspected or started.
+    async fn wait_until_exists(&self) -> Result<()> {
+        let started = tokio::time::Instant::now();
+        while self.inspect().await?.is_none() {
+            if started.elapsed() >= ENDPOINT_TIMEOUT {
+                bail!(
+                    "the computer container `{}` was never created",
+                    self.settings.name
+                );
+            }
+            tokio::time::sleep(ENDPOINT_RETRY).await;
+        }
+        Ok(())
+    }
+
+    /// Polls until the container runs with its port published, which takes a moment after
+    /// a start by this or another process.
+    async fn wait_for_endpoint(&self) -> Result<Endpoint> {
+        let name = &self.settings.name;
+        let started = tokio::time::Instant::now();
+        loop {
+            let inspect = self
+                .inspect()
+                .await?
+                .ok_or_else(|| anyhow!("the computer container `{name}` disappeared"))?;
+            let running = status_of(&inspect) == Some(ContainerStateStatusEnum::RUNNING);
+            match endpoint_from(&inspect) {
+                Ok(endpoint) if running => return Ok(endpoint),
+                Err(error) if started.elapsed() >= ENDPOINT_TIMEOUT => return Err(error),
+                _ if started.elapsed() >= ENDPOINT_TIMEOUT => {
+                    bail!("the computer container `{name}` is not running")
+                }
+                _ => tokio::time::sleep(ENDPOINT_RETRY).await,
+            }
+        }
     }
 
     async fn create(&self) -> Result<()> {
@@ -261,12 +302,21 @@ impl Docked {
         let body = container_body(&self.settings, &self.image.reference, &token);
         let options = CreateContainerOptionsBuilder::new().name(name).build();
         info!(container = %name, %volume, image = %self.image.reference, "creating the computer");
-        within(
+        let created = within(
             "creating the computer container",
             DOCKER_TIMEOUT,
             self.docker.create_container(Some(options), body),
         )
-        .await?;
+        .await;
+        match created {
+            Err(error) if is_conflict(&error) => {
+                info!(container = %name, "another process is creating the computer");
+                self.wait_until_exists().await?;
+            }
+            other => {
+                other?;
+            }
+        }
         within(
             "starting the computer container",
             DOCKER_TIMEOUT,
