@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub const RELEASE_VERSION: Option<&str> = match option_env!("COMPUTER_USE_MCP_VERSION") {
     Some(version) if !version.is_empty() => Some(version),
@@ -79,10 +79,95 @@ impl From<SessionTitle> for String {
     }
 }
 
+/// Smallest accepted screen side, in pixels.
+pub const MIN_SCREEN_SIDE: u16 = 320;
+
+/// Largest accepted screen side, in pixels.
+pub const MAX_SCREEN_SIDE: u16 = 7680;
+
+/// Screen size in pixels. Sides range from [`MIN_SCREEN_SIDE`] to [`MAX_SCREEN_SIDE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ScreenSize {
+    width: u16,
+    height: u16,
+}
+
+/// Why a screen size was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "screen size must look like 1280x800, with each side from {MIN_SCREEN_SIDE} to {MAX_SCREEN_SIDE}"
+)]
+pub struct ScreenSizeError;
+
+impl ScreenSize {
+    pub const DEFAULT: Self = Self {
+        width: 1280,
+        height: 800,
+    };
+
+    /// Parses text such as `1280x800`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the text is not `<width>x<height>` or a side is out of range.
+    pub fn parse(text: &str) -> Result<Self, ScreenSizeError> {
+        let (width, height) = text.trim().split_once(['x', 'X']).ok_or(ScreenSizeError)?;
+        let side = |text: &str| {
+            text.parse::<u16>()
+                .ok()
+                .filter(|side| (MIN_SCREEN_SIDE..=MAX_SCREEN_SIDE).contains(side))
+                .ok_or(ScreenSizeError)
+        };
+        Ok(Self {
+            width: side(width)?,
+            height: side(height)?,
+        })
+    }
+
+    #[must_use]
+    pub fn width(self) -> u16 {
+        self.width
+    }
+
+    #[must_use]
+    pub fn height(self) -> u16 {
+        self.height
+    }
+}
+
+impl Default for ScreenSize {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl std::fmt::Display for ScreenSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}x{}", self.width, self.height)
+    }
+}
+
+impl TryFrom<String> for ScreenSize {
+    type Error = ScreenSizeError;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::parse(&text)
+    }
+}
+
+impl From<ScreenSize> for String {
+    fn from(size: ScreenSize) -> Self {
+        size.to_string()
+    }
+}
+
 /// Body of `POST /sessions`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSession {
     pub title: SessionTitle,
+    /// Size of the session's screen, applied when the screen opens.
+    pub screen_size: ScreenSize,
 }
 
 /// Length of a session id, in hex digits.
@@ -148,6 +233,35 @@ pub struct SessionCreated {
     pub session: SessionId,
 }
 
+/// Pointer position on the screen, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cursor {
+    pub x: i16,
+    pub y: i16,
+}
+
+/// Reply to `POST /sessions/{id}/observe`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Observation {
+    /// Changes whenever the screen content changed since the previous frame.
+    pub frame_id: u64,
+    /// Capture time as an RFC 3339 UTC timestamp.
+    pub captured_at: String,
+    pub width: u16,
+    pub height: u16,
+    pub cursor: Cursor,
+    /// Title of the focused window, empty when there is none.
+    pub active_window: String,
+    /// Base64 PNG of the screen. `None` when the frame is the one the session saw last.
+    pub png_base64: Option<String>,
+}
+
+/// Body of every error reply from `computerd`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiError {
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,8 +299,28 @@ mod tests {
     }
 
     #[test]
+    fn screen_size_parses_width_by_height_within_limits() {
+        let size = ScreenSize::parse(" 1920x1080 ").unwrap();
+        assert_eq!((size.width(), size.height()), (1920, 1080));
+        assert_eq!(size.to_string(), "1920x1080");
+        for bad in [
+            "",
+            "1280",
+            "1280x",
+            "x800",
+            "1280x800x2",
+            "319x800",
+            "1280x7681",
+            "-1x800",
+            "axb",
+        ] {
+            assert_eq!(ScreenSize::parse(bad), Err(ScreenSizeError), "{bad}");
+        }
+    }
+
+    #[test]
     fn request_body_with_a_bad_title_is_refused() {
-        let body = serde_json::json!({ "title": "" });
+        let body = serde_json::json!({ "title": "", "screen_size": "1280x800" });
         assert!(serde_json::from_value::<CreateSession>(body).is_err());
     }
 }

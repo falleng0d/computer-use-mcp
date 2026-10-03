@@ -34,11 +34,14 @@ Add it to your agent host as an MCP server that runs `computer-use-mcp` with no 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `COMPUTER_USE_NAME` | `computer-use` | Name of the container. The home volume is `<name>-home`. Applies at creation. |
+| `COMPUTER_USE_SCREEN_SIZE` | `1280x800` | Size of each session's screen, as `<width>x<height>` with sides from 320 to 7680. Read when `start_computer` runs. |
 | `COMPUTER_USE_IMAGE` | Release builds use `ghcr.io/falleng0d/computer-use-mcp:<version>`. Dev builds use `computer-use-mcp:dev`. | Image used for the computer container. |
 
 Release builds pull their image when it is missing. Dev builds never pull, so a dev host binary is never paired with an old image by accident. Build the dev image with `just image`.
 
 The server makes no Docker calls until an agent calls `start_computer`. That tool takes a title (1 to 80 characters) and returns a session id. The computer gets the host timezone and the `en_US.UTF-8` locale when it is created.
+
+`computer_observe` takes the session id and returns a PNG of that session's own screen plus the frame id, capture time, size, cursor position, and active window title. The first call opens the screen, which is one `Xvnc` and Fluxbox inside the computer. The computer has 16 screens. A session that never calls it gets none, and ending the session closes its screen. When nothing changed since the session's previous screenshot, the image is left out and the text says so.
 
 ## Development
 

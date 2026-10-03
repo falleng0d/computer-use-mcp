@@ -1,6 +1,7 @@
 mod client;
 mod computer;
 mod image;
+mod observation;
 mod server;
 
 use anyhow::Context;

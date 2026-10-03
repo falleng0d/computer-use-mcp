@@ -2,13 +2,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use computer_protocol::{
-    CreateSession, Health, PROTOCOL_VERSION, SessionCreated, SessionId, SessionTitle, VERSION,
+    ApiError, CreateSession, Health, Observation, PROTOCOL_VERSION, ScreenSize, SessionCreated,
+    SessionId, SessionTitle, VERSION,
 };
 use reqwest::StatusCode;
 
 use crate::computer::Endpoint;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const OBSERVE_TIMEOUT: Duration = Duration::from_secs(40);
 const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const HEALTH_DEADLINE: Duration = Duration::from_secs(60);
 const HEALTH_RETRY: Duration = Duration::from_millis(250);
@@ -74,12 +76,16 @@ impl Client {
         })
     }
 
-    pub async fn create_session(&self, title: SessionTitle) -> Result<SessionId> {
+    pub async fn create_session(
+        &self,
+        title: SessionTitle,
+        screen_size: ScreenSize,
+    ) -> Result<SessionId> {
         let created: SessionCreated = self
             .http
             .post(format!("{}/sessions", self.base))
             .bearer_auth(&self.token)
-            .json(&CreateSession { title })
+            .json(&CreateSession { title, screen_size })
             .send()
             .await
             .context("creating the session")?
@@ -107,5 +113,36 @@ impl Client {
             .error_for_status()
             .context("ending the session")
             .map(|_| ())
+    }
+}
+
+impl Client {
+    /// Takes a screenshot of the session's screen, opening the screen on the first call.
+    ///
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub async fn observe(&self, session: &SessionId) -> Result<Observation> {
+        let response = self
+            .http
+            .post(format!("{}/sessions/{session}/observe", self.base))
+            .bearer_auth(&self.token)
+            .timeout(OBSERVE_TIMEOUT)
+            .send()
+            .await
+            .context("asking the computer for a screenshot")?;
+        let status = response.status();
+        if status == StatusCode::NOT_FOUND {
+            return Err(UnknownSession.into());
+        }
+        if !status.is_success() {
+            let message = match response.json::<ApiError>().await {
+                Ok(error) => error.message,
+                Err(_) => format!("the computer answered {status}"),
+            };
+            bail!("{message}");
+        }
+        response
+            .json()
+            .await
+            .context("reading the screenshot reply")
     }
 }

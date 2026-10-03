@@ -16,9 +16,13 @@ workspace = true
 [dependencies]
 anyhow = "1.0.104"
 axum = "0.8.9"
+base64 = "0.23.1"
 computer-protocol = { version = "0.1.0", path = "../computer-protocol" }
+png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
-tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "net", "signal", "sync"] }
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["formatting"] }
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "process", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "ansi"] }
 uuid = { version = "1.27.0", features = ["v4"] }
@@ -26,3 +30,7 @@ uuid = { version = "1.27.0", features = ["v4"] }
 [dev-dependencies]
 serde_json = "1.0.151"
 tower = { version = "0.5.3", features = ["util"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.190"
+x11rb = { version = "0.14.0", default-features = false, features = ["shm", "damage"] }

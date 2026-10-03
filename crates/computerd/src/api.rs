@@ -1,44 +1,40 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
 use axum::{
     Json, Router,
     extract::{Path, Request, State},
     http::{StatusCode, header::AUTHORIZATION},
     middleware::{self, Next},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use computer_protocol::{
-    CreateSession, Health, PROTOCOL_VERSION, SessionCreated, SessionId, SessionTitle, VERSION,
+    ApiError, CreateSession, Health, Observation, PROTOCOL_VERSION, SessionCreated, SessionId,
+    VERSION,
 };
-use tracing::info;
+use tracing::error;
 use uuid::Uuid;
 
-const BEARER_PREFIX: &str = "Bearer ";
+use crate::sessions::{SessionError, Sessions};
 
-#[derive(Debug)]
-struct Session {
-    title: SessionTitle,
-}
+const BEARER_PREFIX: &str = "Bearer ";
 
 #[derive(Clone)]
 struct AppState {
     token: Arc<str>,
-    sessions: Arc<Mutex<HashMap<SessionId, Session>>>,
+    sessions: Sessions,
 }
 
-pub fn router(token: String) -> Router {
+pub fn router(token: String, sessions: Sessions) -> Router {
     let state = AppState {
         token: token.into(),
-        sessions: Arc::default(),
+        sessions,
     };
     Router::new()
         .route("/health", get(health))
         .route("/sessions", post(create_session))
         .route("/sessions/{id}", delete(end_session))
+        .route("/sessions/{id}/observe", post(observe))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state)
 }
@@ -75,30 +71,41 @@ async fn create_session(
 ) -> (StatusCode, Json<SessionCreated>) {
     let id = SessionId::parse(&Uuid::new_v4().simple().to_string())
         .expect("a simple UUID is 32 lowercase hex digits");
-    info!(session = %id, title = request.title.as_str(), "session started");
-    let session = Session {
-        title: request.title,
-    };
     state
         .sessions
-        .lock()
-        .expect("the session lock is only held for short map updates")
-        .insert(id.clone(), session);
+        .insert(id.clone(), request.title, request.screen_size);
     (StatusCode::CREATED, Json(SessionCreated { session: id }))
 }
 
-async fn end_session(State(state): State<AppState>, Path(id): Path<SessionId>) -> StatusCode {
-    let removed = state
-        .sessions
-        .lock()
-        .expect("the session lock is only held for short map updates")
-        .remove(&id);
-    match removed {
-        Some(session) => {
-            info!(session = %id, title = session.title.as_str(), "session ended");
-            StatusCode::NO_CONTENT
+async fn end_session(
+    State(state): State<AppState>,
+    Path(id): Path<SessionId>,
+) -> Result<StatusCode, SessionError> {
+    state.sessions.end(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn observe(
+    State(state): State<AppState>,
+    Path(id): Path<SessionId>,
+) -> Result<Json<Observation>, SessionError> {
+    state.sessions.observe(&id).await.map(Json)
+}
+
+impl IntoResponse for SessionError {
+    fn into_response(self) -> Response {
+        let status = match self {
+            Self::Unknown => StatusCode::NOT_FOUND,
+            Self::NoFreeScreen => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        if let Self::Failed(error) = &self {
+            error!(error = %format!("{error:#}"), "session call failed");
         }
-        None => StatusCode::NOT_FOUND,
+        let body = ApiError {
+            message: self.to_string(),
+        };
+        (status, Json(body)).into_response()
     }
 }
 
@@ -136,7 +143,7 @@ mod tests {
 
     #[tokio::test]
     async fn requests_without_the_right_token_are_refused() {
-        let app = router(TOKEN.to_owned());
+        let app = router(TOKEN.to_owned(), Sessions::default());
         let health = |token| send(&app, "GET", "/health", token, "");
         assert_eq!(health(None).await.0, StatusCode::UNAUTHORIZED);
         assert_eq!(health(Some("secreT")).await.0, StatusCode::UNAUTHORIZED);
@@ -146,13 +153,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_session_can_be_ended_once() {
-        let app = router(TOKEN.to_owned());
+        let app = router(TOKEN.to_owned(), Sessions::default());
         let (status, body) = send(
             &app,
             "POST",
             "/sessions",
             Some(TOKEN),
-            r#"{"title":"fix the build"}"#,
+            r#"{"title":"fix the build","screen_size":"1280x800"}"#,
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
@@ -165,9 +172,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn observing_an_ended_session_is_not_found() {
+        let app = router(TOKEN.to_owned(), Sessions::default());
+        let uri = format!("/sessions/{}/observe", "0".repeat(32));
+        assert_eq!(
+            send(&app, "POST", &uri, Some(TOKEN), "").await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
     async fn a_blank_title_is_rejected() {
-        let app = router(TOKEN.to_owned());
-        let (status, _) = send(&app, "POST", "/sessions", Some(TOKEN), r#"{"title":"  "}"#).await;
+        let app = router(TOKEN.to_owned(), Sessions::default());
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/sessions",
+            Some(TOKEN),
+            r#"{"title":"  ","screen_size":"1280x800"}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
