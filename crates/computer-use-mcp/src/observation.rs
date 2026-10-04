@@ -8,7 +8,7 @@ const UNCHANGED_NOTE: &str =
 const CHANGED_NOTE: &str = "Screenshot of your screen.";
 
 /// The tool result for an observation: the image when the frame is new, and the metadata as text.
-pub fn tool_result(observation: Observation) -> CallToolResult {
+pub(crate) fn tool_result(observation: Observation) -> CallToolResult {
     let note = if observation.png_base64.is_some() {
         CHANGED_NOTE
     } else {
@@ -30,7 +30,7 @@ pub fn tool_result(observation: Observation) -> CallToolResult {
 }
 
 /// The tool result for a batch of actions: a count, then the closing screenshot when there is one.
-pub fn act_result(reply: ActReply) -> CallToolResult {
+pub(crate) fn act_result(reply: ActReply) -> CallToolResult {
     let ran = format!(
         "Ran {} action{}.",
         reply.actions_run,

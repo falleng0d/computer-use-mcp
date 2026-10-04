@@ -30,9 +30,9 @@ const HEALTH_RETRY: Duration = Duration::from_millis(250);
 /// A call named a session `computerd` does not have, which the agent fixes by starting over.
 #[derive(Debug, thiserror::Error)]
 #[error("unknown session, call start_computer first")]
-pub struct UnknownSession {
+pub(crate) struct UnknownSession {
     /// Why the session ended, when `computerd` still remembers it.
-    pub reason: Option<String>,
+    pub(crate) reason: Option<String>,
 }
 
 /// What an agent is told when the running computer speaks another protocol than this server.
@@ -51,14 +51,14 @@ fn protocol_mismatch(computer_protocol: u32, computer_version: &str, container: 
     }
 }
 
-pub struct Client {
+pub(crate) struct Client {
     http: reqwest::Client,
     base: String,
     token: String,
 }
 
 impl Client {
-    pub fn new(endpoint: &Endpoint) -> Result<Self> {
+    pub(crate) fn new(endpoint: &Endpoint) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .no_proxy()
@@ -85,7 +85,7 @@ impl Client {
     }
 
     /// Waits until `computerd` answers with the protocol version this build speaks.
-    pub async fn wait_until_ready(&self, container: &str) -> Result<()> {
+    pub(crate) async fn wait_until_ready(&self, container: &str) -> Result<()> {
         let started = tokio::time::Instant::now();
         let last_error = loop {
             match self.health().await {
@@ -107,7 +107,7 @@ impl Client {
         })
     }
 
-    pub async fn create_session(
+    pub(crate) async fn create_session(
         &self,
         title: SessionTitle,
         screen_size: ScreenSize,
@@ -138,7 +138,7 @@ impl Client {
     }
 
     /// Ends a session. Fails with [`UnknownSession`] when `computerd` does not know it.
-    pub async fn end_session(&self, session: &SessionId) -> Result<()> {
+    pub(crate) async fn end_session(&self, session: &SessionId) -> Result<()> {
         let response = self
             .http
             .delete(format!("{}/sessions/{session}", self.base))
@@ -150,7 +150,7 @@ impl Client {
     }
 
     /// The viewer password and how many viewer pages are open.
-    pub async fn viewer(&self) -> Result<ViewerInfo> {
+    pub(crate) async fn viewer(&self) -> Result<ViewerInfo> {
         self.http
             .get(format!("{}/viewer", self.base))
             .bearer_auth(&self.token)
@@ -165,7 +165,7 @@ impl Client {
     }
 
     /// Asks every open viewer page to switch to `screen`. The reply counts the open pages.
-    pub async fn show_screen(&self, screen: u8) -> Result<ViewerInfo> {
+    pub(crate) async fn show_screen(&self, screen: u8) -> Result<ViewerInfo> {
         self.http
             .post(format!("{}/viewer/show/{screen}", self.base))
             .bearer_auth(&self.token)
@@ -180,7 +180,7 @@ impl Client {
     }
 
     /// Tells `computerd` the owner is alive, which keeps all its sessions.
-    pub async fn heartbeat(&self, owner: &OwnerId) -> Result<()> {
+    pub(crate) async fn heartbeat(&self, owner: &OwnerId) -> Result<()> {
         self.http
             .post(format!("{}/owners/{owner}/heartbeat", self.base))
             .bearer_auth(&self.token)
@@ -193,7 +193,7 @@ impl Client {
     }
 
     /// Ends every session of the owner. Gives up after a few seconds.
-    pub async fn end_owner(&self, owner: &OwnerId) -> Result<()> {
+    pub(crate) async fn end_owner(&self, owner: &OwnerId) -> Result<()> {
         self.http
             .delete(format!("{}/owners/{owner}", self.base))
             .bearer_auth(&self.token)
@@ -211,7 +211,7 @@ impl Client {
     /// Takes a screenshot of the session's screen, opening the screen on the first call.
     ///
     /// Fails with [`UnknownSession`] when `computerd` does not know the session.
-    pub async fn observe(&self, session: &SessionId) -> Result<Observation> {
+    pub(crate) async fn observe(&self, session: &SessionId) -> Result<Observation> {
         let response = self
             .http
             .post(format!("{}/sessions/{session}/observe", self.base))
@@ -230,7 +230,7 @@ impl Client {
     /// Opens a file or an http(s) URL on the session's screen and returns a screenshot.
     ///
     /// Fails with [`UnknownSession`] when `computerd` does not know the session.
-    pub async fn open_path(&self, session: &SessionId, path: String) -> Result<Observation> {
+    pub(crate) async fn open_path(&self, session: &SessionId, path: String) -> Result<Observation> {
         let response = self
             .http
             .post(format!("{}/sessions/{session}/open", self.base))
@@ -246,7 +246,7 @@ impl Client {
     /// Starts or raises an application on the session's screen and returns a screenshot.
     ///
     /// Fails with [`UnknownSession`] when `computerd` does not know the session.
-    pub async fn launch_app(
+    pub(crate) async fn launch_app(
         &self,
         session: &SessionId,
         application: String,
@@ -267,7 +267,7 @@ impl Client {
     /// Runs a batch of actions on the session's screen.
     ///
     /// Fails with [`UnknownSession`] when `computerd` does not know the session.
-    pub async fn act(&self, session: &SessionId, request: &ActRequest) -> Result<ActReply> {
+    pub(crate) async fn act(&self, session: &SessionId, request: &ActRequest) -> Result<ActReply> {
         let response = self
             .http
             .post(format!("{}/sessions/{session}/act", self.base))
@@ -288,7 +288,7 @@ impl Client {
     ///
     /// `timeouts` are the session's, so the HTTP timeout outlasts the command's own.
     /// Fails with [`UnknownSession`] when `computerd` does not know the session.
-    pub async fn shell(
+    pub(crate) async fn shell(
         &self,
         session: &SessionId,
         request: &ShellRequest,
@@ -309,7 +309,7 @@ impl Client {
     /// Changes the session's working folder.
     ///
     /// Fails with [`UnknownSession`] when `computerd` does not know the session.
-    pub async fn set_cwd(&self, session: &SessionId, path: String) -> Result<SetCwdReply> {
+    pub(crate) async fn set_cwd(&self, session: &SessionId, path: String) -> Result<SetCwdReply> {
         let response = self
             .http
             .post(format!("{}/sessions/{session}/cwd", self.base))
@@ -324,7 +324,7 @@ impl Client {
     /// Lists a folder, the session's working folder when `path` is `None`.
     ///
     /// Fails with [`UnknownSession`] when `computerd` does not know the session.
-    pub async fn list_files(
+    pub(crate) async fn list_files(
         &self,
         session: &SessionId,
         request: &ListFilesRequest,
@@ -336,7 +336,7 @@ impl Client {
     /// Reads a text file or an image.
     ///
     /// Fails with [`UnknownSession`] when `computerd` does not know the session.
-    pub async fn read_file(
+    pub(crate) async fn read_file(
         &self,
         session: &SessionId,
         request: &ReadFileRequest,
@@ -348,7 +348,7 @@ impl Client {
     /// Writes a text file.
     ///
     /// Fails with [`UnknownSession`] when `computerd` does not know the session.
-    pub async fn write_file(
+    pub(crate) async fn write_file(
         &self,
         session: &SessionId,
         request: &WriteFileRequest,

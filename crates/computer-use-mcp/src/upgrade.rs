@@ -3,19 +3,19 @@ use chrono::{DateTime, FixedOffset};
 use semver::Version;
 
 /// Image label that holds the release version the image was built for.
-pub const VERSION_LABEL: &str = "org.opencontainers.image.version";
+const VERSION_LABEL: &str = "org.opencontainers.image.version";
 
 /// What the upgrade decision knows about an image.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImageFacts {
-    pub id: String,
+pub(crate) struct ImageFacts {
+    id: String,
     /// Release version from [`VERSION_LABEL`], `None` for dev builds and images without the label.
-    pub version: Option<String>,
-    pub created: Option<DateTime<FixedOffset>>,
+    pub(crate) version: Option<String>,
+    created: Option<DateTime<FixedOffset>>,
 }
 
 impl ImageFacts {
-    pub fn from_inspect(inspect: &ImageInspect) -> Option<Self> {
+    pub(crate) fn from_inspect(inspect: &ImageInspect) -> Option<Self> {
         let version = inspect
             .config
             .as_ref()
@@ -34,7 +34,7 @@ impl ImageFacts {
     }
 
     /// The image ID without the `sha256:` prefix, cut to 12 characters.
-    pub fn short_id(&self) -> &str {
+    pub(crate) fn short_id(&self) -> &str {
         let id = self.id.strip_prefix("sha256:").unwrap_or(&self.id);
         id.get(..12).unwrap_or(id)
     }
@@ -42,7 +42,7 @@ impl ImageFacts {
 
 /// How two images with different IDs are ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Compare {
+pub(crate) enum Compare {
     /// By release version. Used by release builds that run their own published image.
     Version,
     /// By build time. Used by dev builds and when `COMPUTER_USE_IMAGE` names the image.
@@ -57,7 +57,7 @@ fn parse_version(version: &str) -> Option<Version> {
 ///
 /// An image without a readable version is older than any image with one. The same image, an older image, and an image that cannot be
 /// ordered (a version that is not semver) are never newer, so a computer never moves backwards.
-pub fn is_newer(have: &ImageFacts, wanted: &ImageFacts, by: Compare) -> bool {
+pub(crate) fn is_newer(have: &ImageFacts, wanted: &ImageFacts, by: Compare) -> bool {
     if have.id == wanted.id {
         return false;
     }

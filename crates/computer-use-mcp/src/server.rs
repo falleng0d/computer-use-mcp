@@ -135,25 +135,25 @@ async fn beat(owner: OwnerId, endpoint: watch::Receiver<Option<Endpoint>>) {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct StartComputerArgs {
+struct StartComputerArgs {
     /// Short description of your task, 1 to 80 characters. Shown to the user next to your screen.
     title: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct EndSessionArgs {
+struct EndSessionArgs {
     /// Session id returned by `start_computer`.
     session: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ObserveArgs {
+struct ObserveArgs {
     /// Session id returned by `start_computer`.
     session: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ActArgs {
+struct ActArgs {
     /// Session id returned by `start_computer`.
     session: String,
     /// Up to 24 actions, run in order on your screen. A double click counts as two.
@@ -165,7 +165,7 @@ pub struct ActArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ShellArgs {
+struct ShellArgs {
     /// Session id returned by `start_computer`.
     session: String,
     /// Command line, run with `bash -lc` in your working folder.
@@ -175,7 +175,7 @@ pub struct ShellArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct OpenPathArgs {
+struct OpenPathArgs {
     /// Session id returned by `start_computer`.
     session: String,
     /// An http(s) URL, or a file path. A relative path starts at your working folder, `~` is home.
@@ -183,7 +183,7 @@ pub struct OpenPathArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LaunchAppArgs {
+struct LaunchAppArgs {
     /// Session id returned by `start_computer`.
     session: String,
     /// What to launch: `browser`, `terminal`, the name of an installed application, or a program on `PATH`.
@@ -193,7 +193,7 @@ pub struct LaunchAppArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SetCwdArgs {
+struct SetCwdArgs {
     /// Session id returned by `start_computer`.
     session: String,
     /// Folder that becomes your working folder. A relative path starts at the current one, `~` is home.
@@ -201,7 +201,7 @@ pub struct SetCwdArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ListFilesArgs {
+struct ListFilesArgs {
     /// Session id returned by `start_computer`.
     session: String,
     /// Folder to list. A relative path starts at your working folder, `~` is home. Defaults to your working folder.
@@ -209,7 +209,7 @@ pub struct ListFilesArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ReadFileArgs {
+struct ReadFileArgs {
     /// Session id returned by `start_computer`.
     session: String,
     /// File to read. A relative path starts at your working folder, `~` is home.
@@ -221,7 +221,7 @@ pub struct ReadFileArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct WriteFileArgs {
+struct WriteFileArgs {
     /// Session id returned by `start_computer`.
     session: String,
     /// File to write. A relative path starts at your working folder, `~` is home. Missing folders are created.
@@ -231,7 +231,7 @@ pub struct WriteFileArgs {
 }
 
 #[derive(Clone)]
-pub struct Server {
+pub(crate) struct Server {
     settings: Settings,
     screen_size: Result<ScreenSize, String>,
     shell_timeouts: Result<ShellTimeouts, String>,
@@ -264,7 +264,7 @@ impl Started {
 }
 
 impl Server {
-    pub fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         Self::new(
             Settings::from_env(),
             image::from_env(),
@@ -350,7 +350,7 @@ impl Server {
     }
 
     /// Ends every session this process started. Call before the process exits.
-    pub async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) {
         self.opener.shutdown().await;
         self.heartbeats.stop().await;
     }

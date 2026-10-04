@@ -2,7 +2,7 @@ use computer_protocol::{ShellOutcome, ShellReply};
 use rmcp::model::{CallToolResult, ContentBlock};
 
 /// Text the agent reads for a finished command.
-pub fn describe(reply: &ShellReply) -> String {
+fn describe(reply: &ShellReply) -> String {
     let how = match reply.outcome {
         ShellOutcome::Exited { code } => format!("exit code: {code}"),
         ShellOutcome::Signaled { signal } => format!("killed by signal {signal}"),
@@ -24,7 +24,7 @@ fn stream(text: &str) -> &str {
 }
 
 /// A command that ran is a normal result, even when it failed. A timeout is flagged as an error.
-pub fn tool_result(reply: &ShellReply) -> CallToolResult {
+pub(crate) fn tool_result(reply: &ShellReply) -> CallToolResult {
     let content = vec![ContentBlock::text(describe(reply))];
     if matches!(
         reply.outcome,

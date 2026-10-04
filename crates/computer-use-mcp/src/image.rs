@@ -1,18 +1,18 @@
 use crate::settings;
 
-pub const REGISTRY_IMAGE: &str = "ghcr.io/falleng0d/computer-use-mcp";
-pub const DEV_IMAGE: &str = "computer-use-mcp:dev";
+const REGISTRY_IMAGE: &str = "ghcr.io/falleng0d/computer-use-mcp";
+pub(crate) const DEV_IMAGE: &str = "computer-use-mcp:dev";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Image {
-    pub reference: String,
-    pub pull: bool,
+pub(crate) struct Image {
+    pub(crate) reference: String,
+    pub(crate) pull: bool,
     /// Images are ordered by release version, not by build time. True only for a release build
     /// that runs its own published image.
-    pub by_version: bool,
+    pub(crate) by_version: bool,
 }
 
-pub fn select(release_version: Option<&str>, image_override: Option<&str>) -> Image {
+fn select(release_version: Option<&str>, image_override: Option<&str>) -> Image {
     let reference = match (image_override, release_version) {
         (Some(reference), _) => reference.to_owned(),
         (None, Some(version)) => format!("{REGISTRY_IMAGE}:{version}"),
@@ -25,7 +25,7 @@ pub fn select(release_version: Option<&str>, image_override: Option<&str>) -> Im
     }
 }
 
-pub fn from_env() -> Image {
+pub(crate) fn from_env() -> Image {
     select(
         computer_protocol::RELEASE_VERSION,
         settings::image_override().as_deref(),

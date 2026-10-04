@@ -31,7 +31,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Where a newly opened screen shows up for the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Mode {
+pub(crate) enum Mode {
     #[default]
     Browser,
     Vnc,
@@ -174,7 +174,7 @@ fn is_password_file(name: &str) -> bool {
 }
 
 /// Removes password files that an earlier server left in the temp folder, such as after a crash.
-pub fn remove_stale_password_files() {
+pub(crate) fn remove_stale_password_files() {
     remove_stale_in(&std::env::temp_dir(), STALE_AFTER);
 }
 
@@ -211,14 +211,14 @@ impl Shared {
 }
 
 /// Opens the viewer for new screens in tasks of its own, so a tool call never waits for it.
-pub struct Opener {
+pub(crate) struct Opener {
     mode: Mode,
     shared: Arc<Shared>,
     tasks: StdMutex<JoinSet<()>>,
 }
 
 impl Opener {
-    pub fn new(mode: Mode) -> Self {
+    pub(crate) fn new(mode: Mode) -> Self {
         Self {
             mode,
             shared: Arc::new(Shared {
@@ -230,7 +230,7 @@ impl Opener {
     }
 
     /// Starts opening the viewer on `screen`. Problems are logged, never returned.
-    pub fn screen_opened(&self, endpoint: Endpoint, screen: u8) {
+    pub(crate) fn screen_opened(&self, endpoint: Endpoint, screen: u8) {
         if self.mode == Mode::None {
             return;
         }
@@ -262,7 +262,7 @@ impl Opener {
     }
 
     /// Cancels pending openers and removes password files.
-    pub async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) {
         let mut tasks = std::mem::take(
             &mut *self
                 .tasks

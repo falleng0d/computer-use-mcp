@@ -39,16 +39,16 @@ const PULL_TIMEOUT: Duration = Duration::from_mins(15);
 
 /// Names and host facts used when the computer is created.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Settings {
-    pub name: String,
-    pub timezone: Option<String>,
+pub(crate) struct Settings {
+    pub(crate) name: String,
+    pub(crate) timezone: Option<String>,
     /// Host port of the viewer page. Raw VNC for screen N is on this plus N. An invalid
     /// setting stays a message, so only creating the computer fails.
-    pub port_base: Result<u16, String>,
+    pub(crate) port_base: Result<u16, String>,
 }
 
 impl Settings {
-    pub fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         let name = settings::name().unwrap_or_else(|| DEFAULT_NAME.to_owned());
         let timezone = iana_time_zone::get_timezone()
             .inspect_err(|error| warn!(%error, "could not read the host timezone"))
@@ -61,23 +61,23 @@ impl Settings {
         }
     }
 
-    pub fn volume(&self) -> String {
+    pub(crate) fn volume(&self) -> String {
         format!("{}{VOLUME_SUFFIX}", self.name)
     }
 }
 
 /// Where and how to reach `computerd` on a running computer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Endpoint {
-    pub port: u16,
-    pub token: String,
+pub(crate) struct Endpoint {
+    pub(crate) port: u16,
+    pub(crate) token: String,
     /// Host port of the viewer page, `None` for a computer made before the viewer existed.
-    pub viewer_port: Option<u16>,
+    pub(crate) viewer_port: Option<u16>,
 }
 
 /// What to do with the container that `start_computer` found.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Plan {
+enum Plan {
     Do(Step),
     /// Remove the exited container and create it again on the wanted image.
     Recreate,
@@ -85,7 +85,7 @@ pub enum Plan {
 
 /// A way to get a usable container that removes nothing.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Step {
+enum Step {
     Create,
     Start,
     Reuse,
@@ -95,7 +95,7 @@ pub enum Step {
 /// Picks what to do from the container's state, and whether the wanted image is newer than the
 /// one the container was made from. Only an exited container is ever recreated. A container that
 /// is only `created` may be about to be started by another process.
-pub fn plan(status: Option<ContainerStateStatusEnum>, newer_image: bool) -> Plan {
+fn plan(status: Option<ContainerStateStatusEnum>, newer_image: bool) -> Plan {
     if newer_image && is_exited(status) {
         Plan::Recreate
     } else {
@@ -103,7 +103,7 @@ pub fn plan(status: Option<ContainerStateStatusEnum>, newer_image: bool) -> Plan
     }
 }
 
-pub fn step(status: Option<ContainerStateStatusEnum>) -> Step {
+fn step(status: Option<ContainerStateStatusEnum>) -> Step {
     use ContainerStateStatusEnum::{
         CREATED, DEAD, EXITED, PAUSED, REMOVING, RESTARTING, RUNNING, STOPPING,
     };
@@ -145,7 +145,7 @@ fn port_bindings(base: u16) -> HashMap<String, Option<Vec<PortBinding>>> {
         .collect()
 }
 
-pub fn container_body(
+fn container_body(
     settings: &Settings,
     port_base: u16,
     image: &str,
@@ -190,7 +190,7 @@ fn endpoint_token(inspect: &ContainerInspectResponse) -> Option<&str> {
 }
 
 /// Reads the published `computerd` port and the token from an inspected container.
-pub fn endpoint_from(inspect: &ContainerInspectResponse) -> Result<Endpoint> {
+fn endpoint_from(inspect: &ContainerInspectResponse) -> Result<Endpoint> {
     let token = endpoint_token(inspect)
         .ok_or_else(|| anyhow!("the container has no {TOKEN_ENV}, it was not made by this tool"))?
         .to_owned();
@@ -218,7 +218,7 @@ pub fn endpoint_from(inspect: &ContainerInspectResponse) -> Result<Endpoint> {
 ///
 /// `creating` is true for a computer being made now, which can move to another base. A computer that
 /// already exists keeps its ports.
-pub fn port_conflict(docker_error: &str, creating: bool) -> Option<String> {
+fn port_conflict(docker_error: &str, creating: bool) -> Option<String> {
     let taken = docker_error.contains("port is already allocated")
         || docker_error.contains("address already in use")
         || docker_error.contains("ports are not available");
@@ -270,7 +270,7 @@ fn explain_start_error(error: anyhow::Error, creating: bool) -> anyhow::Error {
 /// Blocks sit below the Windows ephemeral range (49152 and up), where outgoing connections take
 /// ports. Each block is handed out once per process, so parallel tests never collide.
 #[cfg(test)]
-pub fn free_port_base() -> u16 {
+pub(crate) fn free_port_base() -> u16 {
     use std::{collections::HashSet, net::TcpListener, sync::Mutex};
     const FIRST: u16 = 30000;
     const BLOCK: u16 = 17;
@@ -366,14 +366,14 @@ enum Origin {
 }
 
 /// Docker side of the computer: creates it, starts it, and finds its endpoint.
-pub struct Docked {
+pub(crate) struct Docked {
     docker: Docker,
     settings: Settings,
     image: Image,
 }
 
 impl Docked {
-    pub fn connect(settings: Settings, image: Image) -> Result<Self> {
+    pub(crate) fn connect(settings: Settings, image: Image) -> Result<Self> {
         let docker = crate::docker_host::connect()?;
         Ok(Self {
             docker,
@@ -382,7 +382,7 @@ impl Docked {
         })
     }
 
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.settings.name
     }
 
@@ -402,7 +402,7 @@ impl Docked {
     }
 
     /// Finds the endpoint of a running computer without changing anything.
-    pub async fn running_endpoint(&self) -> Result<Option<Endpoint>> {
+    pub(crate) async fn running_endpoint(&self) -> Result<Option<Endpoint>> {
         match self.inspect().await? {
             Some(inspect) if status_of(&inspect) == Some(ContainerStateStatusEnum::RUNNING) => {
                 endpoint_from(&inspect).map(Some)
@@ -415,7 +415,7 @@ impl Docked {
     ///
     /// A stopped computer on an older image is removed and created again on the wanted image. A
     /// running one is never touched.
-    pub async fn ensure_running(&self) -> Result<Endpoint> {
+    pub(crate) async fn ensure_running(&self) -> Result<Endpoint> {
         let found = self.inspect().await?;
         let status = found.as_ref().and_then(status_of);
         let newer_image = match &found {
@@ -450,7 +450,7 @@ impl Docked {
         Ok(())
     }
 
-    pub fn compare(&self) -> Compare {
+    fn compare(&self) -> Compare {
         if self.image.by_version {
             Compare::Version
         } else {
@@ -470,7 +470,7 @@ impl Docked {
     }
 
     /// Facts about the image this build wants, `None` when it is not available locally.
-    pub async fn wanted_image(&self) -> Result<Option<ImageFacts>> {
+    async fn wanted_image(&self) -> Result<Option<ImageFacts>> {
         match self.image_facts(&self.image.reference).await {
             Ok(facts) => Ok(Some(facts)),
             Err(error) if is_not_found(&error) => Ok(None),
@@ -479,7 +479,7 @@ impl Docked {
     }
 
     /// Facts about the image an existing container was made from.
-    pub async fn container_image(&self, found: &ContainerInspectResponse) -> Result<ImageFacts> {
+    async fn container_image(&self, found: &ContainerInspectResponse) -> Result<ImageFacts> {
         let id = found
             .image
             .as_deref()
@@ -488,7 +488,7 @@ impl Docked {
     }
 
     /// Lines for `info` about the computer container, if there is one.
-    pub async fn describe(&self) -> Result<Vec<String>> {
+    pub(crate) async fn describe(&self) -> Result<Vec<String>> {
         let name = &self.settings.name;
         let Some(found) = self.inspect().await? else {
             return Ok(vec![format!(

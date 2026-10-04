@@ -4,7 +4,7 @@ use computer_protocol::{FileKind, ListFilesReply, ReadFileReply, WriteFileReply}
 use rmcp::model::{CallToolResult, ContentBlock};
 
 /// Text the agent reads for a listed folder.
-pub fn describe_list(reply: &ListFilesReply) -> String {
+pub(crate) fn describe_list(reply: &ListFilesReply) -> String {
     let mut text = format!("{}\n{} entries", reply.path, reply.entries.len());
     if reply.omitted > 0 {
         let _ = write!(
@@ -32,7 +32,7 @@ pub fn describe_list(reply: &ListFilesReply) -> String {
 }
 
 /// The tool result for a read: the text then a note on the rest, or a line naming the image then the image.
-pub fn read_result(reply: ReadFileReply) -> CallToolResult {
+pub(crate) fn read_result(reply: ReadFileReply) -> CallToolResult {
     match reply {
         ReadFileReply::Text { text, note, .. } => {
             let mut content = vec![ContentBlock::text(text)];
@@ -52,7 +52,7 @@ pub fn read_result(reply: ReadFileReply) -> CallToolResult {
     }
 }
 
-pub fn describe_write(reply: &WriteFileReply) -> String {
+pub(crate) fn describe_write(reply: &WriteFileReply) -> String {
     format!("wrote {} bytes to {}", reply.bytes, reply.path)
 }
 
