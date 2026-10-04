@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "computer-protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "des",
  "schemars",
@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "computer-transfer"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "computer-protocol",
  "futures-util",
@@ -402,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "computer-use-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bollard",
@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "computerd"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",

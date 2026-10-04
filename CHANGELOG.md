@@ -6,6 +6,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.3.0](https://github.com/falleng0d/computer-use-mcp/compare/v0.2.0...v0.3.0) - 2026-10-04
+
+### Added
+
+- publish the host binary and its crates to crates.io
+
+- *(computer-use-mcp)* add start_chrome_devtools and stop_chrome_devtools
+
+- *(computerd)* install chrome-devtools-mcp and mcpc with an idle wrapper
+
+- *(computer-use-mcp)* transfer files and folders with file_transfer
+
+- *(computerd)* copy and paste between the host and an unlocked viewer
+
+- *(computerd)* add a viewer top bar with Lock and Unlock
+
+- *(computerd)* install LibreOffice Writer, Calc, and Impress
+
+- *(computerd)* search Google's Web view from the address bar
+
+- *(computerd)* add a dock and restyle the desktop
+
+
+### Fixed
+
+- *(computerd)* keep long DevTools calls alive and bound every mcpc call
+
+- *(computer-use-mcp)* fail an upload when the computer stops reading
+
+- *(computer-use-mcp)* keep long transfers alive and fail cleanly on cut streams
+
+- *(computerd)* release Cmd and Ctrl after a viewer paste and match layouts by character
+
+- *(computerd)* ignore events from a replaced viewer connection
+
+- *(computerd)* open the LibreOffice Start Center and skip crash recovery
+
+
+### Maintenance
+
+- *(computerd)* tidy the image build and note the DevTools shell timeout
+
+- *(Justfile)* add `rm` recipe to stop and remove Docker container
+
+- add .gitattributes file
+
+
+### Tests
+
+- *(computer-transfer)* satisfy clippy on Linux-only tests
+
 ## [0.2.0](https://github.com/falleng0d/computer-use-mcp/compare/v0.1.0...v0.2.0) - 2026-10-04
 
 ### Added
