@@ -14,10 +14,8 @@ use tokio::{sync::Mutex, task::JoinSet, time::Instant};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::{client::Client, computer::Endpoint};
+use crate::{client::Client, computer::Endpoint, settings};
 
-pub const OPEN_ENV: &str = "COMPUTER_USE_OPEN";
-pub const VNC_VIEWER_ENV: &str = "COMPUTER_USE_VNC_VIEWER";
 const VIEWER_PROGRAM: &str = "vncviewer.exe";
 const PASSWD_FILE_PREFIX: &str = "computer-use-";
 const PASSWD_FILE_SUFFIX: &str = ".vncpasswd";
@@ -38,23 +36,6 @@ pub enum Mode {
     Browser,
     Vnc,
     None,
-}
-
-/// Reads `COMPUTER_USE_OPEN`. Unset or empty gives the default.
-pub fn parse_mode(value: Option<&str>) -> Result<Mode, String> {
-    let Some(text) = value.map(str::trim).filter(|text| !text.is_empty()) else {
-        return Ok(Mode::default());
-    };
-    match text.to_ascii_lowercase().as_str() {
-        "browser" => Ok(Mode::Browser),
-        "vnc" => Ok(Mode::Vnc),
-        "none" => Ok(Mode::None),
-        _ => Err(format!("{OPEN_ENV}={text}: expected browser, vnc, or none")),
-    }
-}
-
-pub fn mode_from_env() -> Result<Mode, String> {
-    parse_mode(std::env::var(OPEN_ENV).ok().as_deref())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,7 +144,7 @@ fn viewer_candidates(
 
 /// The viewer program, or `None`. A setting is used only when it names a file.
 fn find_viewer() -> Option<PathBuf> {
-    let setting = std::env::var(VNC_VIEWER_ENV).ok();
+    let setting = settings::vnc_viewer();
     let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).collect())
         .unwrap_or_default();
@@ -179,7 +160,7 @@ fn find_viewer() -> Option<PathBuf> {
             return Some(path);
         }
         warn!(
-            setting = VNC_VIEWER_ENV,
+            setting = settings::VNC_VIEWER_ENV,
             value = set,
             "the setting is not a file"
         );
@@ -454,16 +435,6 @@ async fn write_password_file(shared: &Shared, key: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_open_setting_defaults_to_browser_and_rejects_unknown_values() {
-        assert_eq!(parse_mode(None), Ok(Mode::Browser));
-        assert_eq!(parse_mode(Some("")), Ok(Mode::Browser));
-        assert_eq!(parse_mode(Some(" VNC ")), Ok(Mode::Vnc));
-        assert_eq!(parse_mode(Some("none")), Ok(Mode::None));
-        let error = parse_mode(Some("tab")).unwrap_err();
-        assert!(error.starts_with("COMPUTER_USE_OPEN=tab"), "{error}");
-    }
 
     #[test]
     fn browser_mode_opens_a_tab_only_when_no_page_is_there_or_coming() {

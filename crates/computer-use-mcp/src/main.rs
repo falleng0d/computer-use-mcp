@@ -6,6 +6,7 @@ mod image;
 mod observation;
 mod open;
 mod server;
+mod settings;
 mod shell_result;
 mod upgrade;
 

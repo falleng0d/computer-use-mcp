@@ -1,6 +1,7 @@
+use crate::settings;
+
 pub const REGISTRY_IMAGE: &str = "ghcr.io/falleng0d/computer-use-mcp";
 pub const DEV_IMAGE: &str = "computer-use-mcp:dev";
-pub const IMAGE_ENV: &str = "COMPUTER_USE_IMAGE";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
@@ -25,12 +26,9 @@ pub fn select(release_version: Option<&str>, image_override: Option<&str>) -> Im
 }
 
 pub fn from_env() -> Image {
-    let image_override = std::env::var(IMAGE_ENV)
-        .ok()
-        .filter(|value| !value.is_empty());
     select(
         computer_protocol::RELEASE_VERSION,
-        image_override.as_deref(),
+        settings::image_override().as_deref(),
     )
 }
 

@@ -20,11 +20,10 @@ use uuid::Uuid;
 
 use crate::{
     image::Image,
+    settings::{self, PORT_BASE_ENV},
     upgrade::{self, Compare, ImageFacts},
 };
 
-pub const NAME_ENV: &str = "COMPUTER_USE_NAME";
-pub const PORT_BASE_ENV: &str = "COMPUTER_USE_PORT_BASE";
 const DEFAULT_NAME: &str = "computer-use";
 const VOLUME_SUFFIX: &str = "-home";
 const HOME_DIR: &str = "/home/computer";
@@ -48,31 +47,13 @@ pub struct Settings {
     pub port_base: Result<u16, String>,
 }
 
-/// Reads `COMPUTER_USE_PORT_BASE`, which must leave room for the viewer page and every screen's VNC port.
-pub fn parse_port_base(value: Option<&str>) -> Result<u16, String> {
-    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(DEFAULT_PORT_BASE);
-    };
-    let last = u32::from(SCREEN_COUNT);
-    match value.parse::<u16>() {
-        Ok(base) if base >= 1024 && u32::from(base) + last <= 65535 => Ok(base),
-        _ => Err(format!(
-            "{PORT_BASE_ENV} must be a port from 1024 to {}, got `{value}`",
-            65535 - last
-        )),
-    }
-}
-
 impl Settings {
     pub fn from_env() -> Self {
-        let name = std::env::var(NAME_ENV)
-            .ok()
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| DEFAULT_NAME.to_owned());
+        let name = settings::name().unwrap_or_else(|| DEFAULT_NAME.to_owned());
         let timezone = iana_time_zone::get_timezone()
             .inspect_err(|error| warn!(%error, "could not read the host timezone"))
             .ok();
-        let port_base = parse_port_base(std::env::var(PORT_BASE_ENV).ok().as_deref());
+        let port_base = settings::port_base();
         Self {
             name,
             timezone,
@@ -954,16 +935,6 @@ mod tests {
             }
         );
         assert!(endpoint_from(&ContainerInspectResponse::default()).is_err());
-    }
-
-    #[test]
-    fn the_port_base_leaves_room_for_every_screen() {
-        assert_eq!(parse_port_base(None), Ok(20900));
-        assert_eq!(parse_port_base(Some(" 21900 ")), Ok(21900));
-        assert_eq!(parse_port_base(Some("65519")), Ok(65519));
-        for bad in ["65520", "1023", "abc", "-1", "70000"] {
-            assert!(parse_port_base(Some(bad)).is_err(), "{bad}");
-        }
     }
 
     #[test]

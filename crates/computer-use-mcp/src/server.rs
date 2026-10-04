@@ -6,9 +6,8 @@ use std::{
 
 use anyhow::Context;
 use computer_protocol::{
-    ActRequest, DEFAULT_IDLE_SECS, DEFAULT_SHELL_TIMEOUT_MAX_SECS, DEFAULT_SHELL_TIMEOUT_SECS,
-    HEARTBEAT_INTERVAL_SECS, ListFilesRequest, OwnerId, RawAction, ReadFileRequest, ScreenSize,
-    SessionId, SessionTitle, ShellRequest, ShellTimeouts, WriteFileRequest,
+    ActRequest, HEARTBEAT_INTERVAL_SECS, ListFilesRequest, OwnerId, RawAction, ReadFileRequest,
+    ScreenSize, SessionId, SessionTitle, ShellRequest, ShellTimeouts, WriteFileRequest,
 };
 use rmcp::{
     handler::server::wrapper::Parameters, model::CallToolResult, schemars, tool, tool_handler,
@@ -29,14 +28,10 @@ use crate::{
     image::{self, Image},
     observation,
     open::{self, Opener},
-    shell_result,
+    settings, shell_result,
 };
 
-const START_FIRST: &str = "call start_computer first";
-const SCREEN_SIZE_ENV: &str = "COMPUTER_USE_SCREEN_SIZE";
-const SHELL_TIMEOUT_ENV: &str = "COMPUTER_USE_SHELL_TIMEOUT";
-const SHELL_TIMEOUT_MAX_ENV: &str = "COMPUTER_USE_SHELL_TIMEOUT_MAX";
-const IDLE_TIMEOUT_ENV: &str = "COMPUTER_USE_IDLE_TIMEOUT";
+const SESSION_UNAVAILABLE: &str = "the computer is not running or this session id is not valid, call start_computer to get a new session";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(HEARTBEAT_INTERVAL_SECS);
 
 /// Message for a call on a session that ended, or that `computerd` never knew.
@@ -45,38 +40,9 @@ fn gone(error: anyhow::Error) -> anyhow::Error {
         Some(UnknownSession {
             reason: Some(reason),
         }) => anyhow::anyhow!("{reason}, call start_computer to get a new session"),
-        Some(_) => anyhow::anyhow!(START_FIRST),
+        Some(_) => anyhow::anyhow!(SESSION_UNAVAILABLE),
         None => error,
     }
-}
-
-/// Reads an idle time such as `90`, `90s`, `30m`, or `2h`. Unset or empty gives the default.
-fn parse_idle(value: Option<&str>) -> Result<NonZeroU32, String> {
-    let Some(text) = value.map(str::trim).filter(|text| !text.is_empty()) else {
-        return Ok(NonZeroU32::new(DEFAULT_IDLE_SECS).expect("the default idle time is not zero"));
-    };
-    let (digits, unit) = match text.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
-        Some((at, _)) => text.split_at(at),
-        None => (text, "s"),
-    };
-    let factor = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        _ => 0,
-    };
-    digits
-        .parse::<u32>()
-        .ok()
-        .and_then(|number| number.checked_mul(factor))
-        .and_then(NonZeroU32::new)
-        .ok_or_else(|| {
-            format!("{IDLE_TIMEOUT_ENV}={text}: expected a time above zero such as 90, 30m, or 2h")
-        })
-}
-
-fn idle_from_env() -> Result<NonZeroU32, String> {
-    parse_idle(std::env::var(IDLE_TIMEOUT_ENV).ok().as_deref())
 }
 
 /// Sends heartbeats for the sessions of this process and ends them at shutdown.
@@ -198,16 +164,6 @@ pub struct ActArgs {
     settle_ms: Option<f64>,
 }
 
-/// Reads the screen size setting. An invalid value is kept as a message for `start_computer`.
-fn screen_size_from_env() -> Result<ScreenSize, String> {
-    match std::env::var(SCREEN_SIZE_ENV) {
-        Ok(text) if !text.is_empty() => {
-            ScreenSize::parse(&text).map_err(|error| format!("{SCREEN_SIZE_ENV}={text}: {error}"))
-        }
-        _ => Ok(ScreenSize::default()),
-    }
-}
-
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ShellArgs {
     /// Session id returned by `start_computer`.
@@ -274,36 +230,6 @@ pub struct WriteFileArgs {
     content: String,
 }
 
-/// Seconds from an environment value, `None` when unset or empty.
-fn parse_secs(name: &str, value: Option<&str>) -> Result<Option<u32>, String> {
-    match value.filter(|text| !text.is_empty()) {
-        None => Ok(None),
-        Some(text) => text
-            .trim()
-            .parse()
-            .map(Some)
-            .map_err(|_| format!("{name}={text}: expected a whole number of seconds")),
-    }
-}
-
-/// Builds the shell timeouts from the two settings. A default left unset follows a lower maximum.
-fn shell_timeouts_from(default: Option<&str>, max: Option<&str>) -> Result<ShellTimeouts, String> {
-    let default = parse_secs(SHELL_TIMEOUT_ENV, default)?;
-    let max = parse_secs(SHELL_TIMEOUT_MAX_ENV, max)?;
-    let max_secs = max.unwrap_or(DEFAULT_SHELL_TIMEOUT_MAX_SECS);
-    let default_secs = default.unwrap_or_else(|| DEFAULT_SHELL_TIMEOUT_SECS.min(max_secs));
-    ShellTimeouts::new(default_secs, max_secs)
-        .map_err(|error| format!("{SHELL_TIMEOUT_ENV} and {SHELL_TIMEOUT_MAX_ENV}: {error}"))
-}
-
-fn shell_timeouts_from_env() -> Result<ShellTimeouts, String> {
-    let read = |name| std::env::var(name).ok();
-    shell_timeouts_from(
-        read(SHELL_TIMEOUT_ENV).as_deref(),
-        read(SHELL_TIMEOUT_MAX_ENV).as_deref(),
-    )
-}
-
 #[derive(Clone)]
 pub struct Server {
     settings: Settings,
@@ -342,10 +268,10 @@ impl Server {
         Self::new(
             Settings::from_env(),
             image::from_env(),
-            screen_size_from_env(),
-            shell_timeouts_from_env(),
-            idle_from_env(),
-            open::mode_from_env(),
+            settings::screen_size(),
+            settings::shell_timeouts(),
+            settings::idle(),
+            settings::open_mode(),
         )
     }
 
@@ -429,21 +355,22 @@ impl Server {
         self.heartbeats.stop().await;
     }
 
-    /// Client for the running computer, or the `START_FIRST` error.
+    /// Client for the running computer, or the `SESSION_UNAVAILABLE` error.
     async fn client_for(&self, session: &str) -> anyhow::Result<(SessionId, Client)> {
         let (session, endpoint) = self.endpoint_for(session).await?;
         Ok((session, Client::new(&endpoint)?))
     }
 
-    /// Endpoint of the running computer, or the `START_FIRST` error.
+    /// Endpoint of the running computer, or the `SESSION_UNAVAILABLE` error.
     async fn endpoint_for(&self, session: &str) -> anyhow::Result<(SessionId, Endpoint)> {
-        let session = SessionId::parse(session).map_err(|_| anyhow::anyhow!(START_FIRST))?;
+        let session =
+            SessionId::parse(session).map_err(|_| anyhow::anyhow!(SESSION_UNAVAILABLE))?;
         let endpoint = self
             .docked()
             .await?
             .running_endpoint()
             .await?
-            .ok_or_else(|| anyhow::anyhow!(START_FIRST))?;
+            .ok_or_else(|| anyhow::anyhow!(SESSION_UNAVAILABLE))?;
         Ok((session, endpoint))
     }
 
@@ -575,7 +502,7 @@ impl Server {
     }
 }
 
-fn report(what: &str, result: anyhow::Result<String>) -> Result<String, String> {
+fn report<T>(what: &str, result: anyhow::Result<T>) -> Result<T, String> {
     result.map_err(|error| {
         let message = format!("{error:#}");
         error!(tool = what, error = %message, "tool call failed");
@@ -622,11 +549,7 @@ impl Server {
         Parameters(args): Parameters<ObserveArgs>,
     ) -> Result<CallToolResult, String> {
         let result = self.observe(&args.session).await;
-        result.map_err(|error| {
-            let message = format!("{error:#}");
-            error!(tool = "computer_observe", error = %message, "tool call failed");
-            message
-        })
+        report("computer_observe", result)
     }
 
     #[tool(
@@ -637,11 +560,7 @@ impl Server {
         Parameters(args): Parameters<ActArgs>,
     ) -> Result<CallToolResult, String> {
         let result = self.act(args).await;
-        result.map_err(|error| {
-            let message = format!("{error:#}");
-            error!(tool = "computer_act", error = %message, "tool call failed");
-            message
-        })
+        report("computer_act", result)
     }
 
     #[tool(
@@ -652,11 +571,7 @@ impl Server {
         Parameters(args): Parameters<OpenPathArgs>,
     ) -> Result<CallToolResult, String> {
         let result = self.open(args).await;
-        result.map_err(|error| {
-            let message = format!("{error:#}");
-            error!(tool = "open_path", error = %message, "tool call failed");
-            message
-        })
+        report("open_path", result)
     }
 
     #[tool(
@@ -667,11 +582,7 @@ impl Server {
         Parameters(args): Parameters<LaunchAppArgs>,
     ) -> Result<CallToolResult, String> {
         let result = self.launch(args).await;
-        result.map_err(|error| {
-            let message = format!("{error:#}");
-            error!(tool = "launch_app", error = %message, "tool call failed");
-            message
-        })
+        report("launch_app", result)
     }
 
     #[tool(
@@ -682,11 +593,7 @@ impl Server {
         Parameters(args): Parameters<ShellArgs>,
     ) -> Result<CallToolResult, String> {
         let result = self.run_shell(args).await;
-        result.map_err(|error| {
-            let message = format!("{error:#}");
-            error!(tool = "shell", error = %message, "tool call failed");
-            message
-        })
+        report("shell", result)
     }
 
     #[tool(
@@ -716,11 +623,7 @@ impl Server {
         Parameters(args): Parameters<ReadFileArgs>,
     ) -> Result<CallToolResult, String> {
         let result = self.files_read(args).await;
-        result.map_err(|error| {
-            let message = format!("{error:#}");
-            error!(tool = "read_file", error = %message, "tool call failed");
-            message
-        })
+        report("read_file", result)
     }
 
     #[tool(
@@ -760,6 +663,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::settings::parse_idle;
 
     struct Cleanup {
         docker: Docker,
@@ -818,13 +722,13 @@ mod tests {
         let first = server.start("first task").await.unwrap().session;
         server.end(first.as_str()).await.unwrap();
         let error = server.end(first.as_str()).await.unwrap_err();
-        assert_eq!(error.to_string(), START_FIRST);
+        assert_eq!(error.to_string(), SESSION_UNAVAILABLE);
 
         let stop = StopContainerOptionsBuilder::new().t(1).build();
         docker.stop_container(&name, Some(stop)).await.unwrap();
         assert_eq!(
             server.end("anything").await.unwrap_err().to_string(),
-            START_FIRST
+            SESSION_UNAVAILABLE
         );
 
         let second = server.start("second task").await.unwrap().session;
@@ -1003,7 +907,7 @@ mod tests {
 
         server.end(session.as_str()).await.unwrap();
         let error = server.observe(session.as_str()).await.unwrap_err();
-        assert_eq!(error.to_string(), START_FIRST);
+        assert_eq!(error.to_string(), SESSION_UNAVAILABLE);
         server.end(other.as_str()).await.unwrap();
     }
 
@@ -1518,38 +1422,6 @@ none
 
         server.end(writer.as_str()).await.unwrap();
         server.end(reader.as_str()).await.unwrap();
-    }
-
-    #[test]
-    fn idle_time_accepts_seconds_minutes_and_hours_and_refuses_the_rest() {
-        let secs = |text| parse_idle(text).map(NonZeroU32::get);
-        assert_eq!(secs(None), Ok(3600));
-        assert_eq!(secs(Some("")), Ok(3600));
-        assert_eq!(secs(Some("90")), Ok(90));
-        assert_eq!(secs(Some(" 90s ")), Ok(90));
-        assert_eq!(secs(Some("30m")), Ok(1800));
-        assert_eq!(secs(Some("2h")), Ok(7200));
-        for bad in ["0", "0m", "m", "-5", "1d", "1.5h", "4294967295h"] {
-            let message = secs(Some(bad)).unwrap_err();
-            assert!(message.contains(IDLE_TIMEOUT_ENV), "{bad}: {message}");
-        }
-    }
-
-    #[test]
-    fn shell_timeout_settings_default_and_validate() {
-        let secs = |default, max| {
-            shell_timeouts_from(default, max)
-                .map(|timeouts| (timeouts.effective(None).as_secs(), timeouts.max().as_secs()))
-        };
-        assert_eq!(secs(None, None), Ok((120, 600)));
-        assert_eq!(secs(Some("30"), Some("90")), Ok((30, 90)));
-        assert_eq!(secs(None, Some("60")), Ok((60, 60)));
-        assert_eq!(secs(Some(""), Some("")), Ok((120, 600)));
-        let above = secs(Some("700"), None).unwrap_err();
-        assert!(above.contains("must not exceed"), "{above}");
-        let junk = secs(Some("2m"), None).unwrap_err();
-        assert!(junk.starts_with("COMPUTER_USE_SHELL_TIMEOUT=2m"), "{junk}");
-        assert!(secs(Some("0"), None).is_err());
     }
 
     /// A VNC connection after the version and security type exchange.

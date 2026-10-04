@@ -37,9 +37,9 @@ Add it to your agent host as an MCP server that runs `computer-use-mcp` with no 
 | --- | --- | --- |
 | `COMPUTER_USE_NAME` | `computer-use` | Name of the container. The home volume is `<name>-home`. Applies at creation. |
 | `COMPUTER_USE_SCREEN_SIZE` | `1280x800` | Size of each session's screen, as `<width>x<height>` with sides from 320 to 7680. Read when `start_computer` runs. |
-| `COMPUTER_USE_SHELL_TIMEOUT` | `120` | Seconds a `shell` command may run when the agent gives no timeout. Must not exceed the maximum. Read when `start_computer` runs. |
-| `COMPUTER_USE_SHELL_TIMEOUT_MAX` | `600` | Longest timeout an agent may ask for, in seconds. If the default is unset and this is lower than 120, the default follows it. Read when `start_computer` runs. |
-| `COMPUTER_USE_IDLE_TIMEOUT` | `1h` | Time without agent calls after which a session ends. Seconds (`90`) or a number with `s`, `m`, or `h` (`30m`, `2h`). Read when `start_computer` runs. |
+| `COMPUTER_USE_SHELL_TIMEOUT` | `120` | Time a `shell` command may run when the agent gives no timeout, as seconds (`90`) or a number with `s`, `m`, or `h` (`2m`). Must not exceed the maximum. Read when `start_computer` runs. |
+| `COMPUTER_USE_SHELL_TIMEOUT_MAX` | `600` | Longest timeout an agent may ask for, in the same forms. If the default is unset and this is lower than 120, the default follows it. Read when `start_computer` runs. |
+| `COMPUTER_USE_IDLE_TIMEOUT` | `1h` | Time without agent calls after which a session ends. Same forms (`90`, `90s`, `30m`, `2h`). Read when `start_computer` runs. |
 | `COMPUTER_USE_PORT_BASE` | `20900` | First of the 17 host ports the computer publishes on `127.0.0.1` (a port from 1024 to 65519). Applies at creation. |
 | `COMPUTER_USE_OPEN` | `browser` | What opens when one of this server's sessions gets its screen: `browser`, `vnc`, or `none`. Read when `start_computer` runs. See "Opening the viewer". |
 | `COMPUTER_USE_VNC_VIEWER` | unset | Windows only. Path of the VNC viewer that `vnc` mode runs. See "Opening the viewer". |
