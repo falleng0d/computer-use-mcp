@@ -22,7 +22,7 @@ const SUPPORTED_SCHEMES: [&str; 4] = ["unix://", "npipe://", "tcp://", "http://"
 
 /// Why an endpoint was chosen.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reason {
+pub(crate) enum Reason {
     DockerHost,
     DockerContext(String),
     CurrentContext(String),
@@ -50,9 +50,9 @@ struct ContextEndpoint {
 
 /// The chosen endpoint and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Resolved {
-    pub host: String,
-    pub reason: Reason,
+pub(crate) struct Resolved {
+    pub(crate) host: String,
+    pub(crate) reason: Reason,
 }
 
 impl fmt::Display for Resolved {
@@ -113,7 +113,8 @@ fn from_context(
             "Docker context `{name}` does not exist, run `docker context ls` to list contexts or `docker context use default`"
         )
     })?;
-    if endpoint.uses_tls {
+    let tls_host = endpoint.host.starts_with("tcp://") || endpoint.host.starts_with("https://");
+    if endpoint.uses_tls && tls_host {
         bail!(
             "Docker context `{name}` needs TLS, which this server does not support, use a context with a unix socket or named pipe"
         );
@@ -167,12 +168,22 @@ struct MetaEndpoint {
     host: String,
 }
 
-/// Reads `currentContext` from the config file text. Unparsable text means no context.
-fn parse_current_context(text: &str) -> Option<String> {
-    serde_json::from_str::<Config>(text)
-        .ok()?
-        .current_context
-        .filter(|name| !name.is_empty())
+/// Reads `currentContext` from the config file text.
+fn parse_current_context(text: &str) -> Result<Option<String>> {
+    let config: Config = serde_json::from_str(text).context("parsing the file")?;
+    Ok(config.current_context.filter(|name| !name.is_empty()))
+}
+
+/// A missing config file means no current context. Any other failure is an error that names the
+/// file.
+fn read_current_context(config_dir: &Path) -> Result<Option<String>> {
+    let path = config_dir.join("config.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    parse_current_context(&text).with_context(|| format!("reading {}", path.display()))
 }
 
 fn parse_context_endpoint(text: &str, uses_tls: bool) -> Result<ContextEndpoint> {
@@ -229,12 +240,12 @@ fn non_empty_env(key: &str) -> Option<String> {
 ///
 /// # Errors
 /// Fails when a chosen context is unknown or unusable.
-pub fn from_env() -> Result<Resolved> {
+pub(crate) fn from_env() -> Result<Resolved> {
     let config_dir = config_dir();
-    let current_context = config_dir
-        .as_ref()
-        .and_then(|dir| std::fs::read_to_string(dir.join("config.json")).ok())
-        .and_then(|text| parse_current_context(&text));
+    let current_context = match &config_dir {
+        Some(dir) => read_current_context(dir)?,
+        None => None,
+    };
     let docker_host = non_empty_env(HOST_ENV);
     let docker_context = non_empty_env(CONTEXT_ENV);
     resolve(
@@ -255,7 +266,7 @@ pub fn from_env() -> Result<Resolved> {
 ///
 /// # Errors
 /// Names the endpoint and why it was chosen when it cannot be used.
-pub fn connect() -> Result<Docker> {
+pub(crate) fn connect() -> Result<Docker> {
     let resolved = from_env().context("choosing the Docker endpoint")?;
     Docker::connect_with_host(&resolved.host)
         .with_context(|| format!("connecting to Docker at {resolved}"))
@@ -408,11 +419,13 @@ mod tests {
     #[test]
     fn config_and_metadata_files_are_parsed() {
         assert_eq!(
-            parse_current_context(r#"{"auths":{},"currentContext":"colima"}"#),
+            parse_current_context(r#"{"auths":{},"currentContext":"colima"}"#).unwrap(),
             Some("colima".to_owned())
         );
-        assert_eq!(parse_current_context(r#"{"currentContext":""}"#), None);
-        assert_eq!(parse_current_context("not json"), None);
+        assert_eq!(
+            parse_current_context(r#"{"currentContext":""}"#).unwrap(),
+            None
+        );
         assert_eq!(
             parse_context_endpoint(
                 r#"{"Name":"c","Endpoints":{"docker":{"Host":"unix:///a.sock","SkipTLSVerify":false}}}"#,
@@ -422,6 +435,30 @@ mod tests {
             context("unix:///a.sock")
         );
         assert!(parse_context_endpoint(r#"{"Endpoints":{}}"#, false).is_err());
+    }
+
+    #[test]
+    fn a_missing_config_is_no_context_and_a_broken_one_is_an_error_naming_the_file() {
+        let root = std::env::temp_dir().join(format!("docker-config-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = read_current_context(&root).unwrap();
+        std::fs::write(root.join("config.json"), "{ not json").unwrap();
+        let broken = read_current_context(&root).unwrap_err();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(missing, None);
+        assert!(format!("{broken:#}").contains("config.json"));
+    }
+
+    #[test]
+    fn tls_files_only_matter_for_tcp_endpoints() {
+        let socket = ContextEndpoint {
+            host: "unix:///a.sock".to_owned(),
+            uses_tls: true,
+        };
+        let resolved = resolve(&inputs(None, Some("sock"), None), |_| {
+            Ok(Some(socket.clone()))
+        });
+        assert_eq!(resolved.unwrap().host, "unix:///a.sock");
     }
 
     #[test]
