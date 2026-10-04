@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     cap::Capture,
     env::{self, SHELL},
+    proc,
 };
 
 /// Time the pipes get to reach end of file after the shell exits. A background job that
@@ -37,13 +38,12 @@ pub struct Job {
 }
 
 /// Kills the process group when dropped while armed, so a dropped call leaves nothing running.
-struct GroupKill(Option<i32>);
+struct GroupKill(Option<u32>);
 
 impl GroupKill {
     fn kill(&mut self) {
         if let Some(group) = self.0.take() {
-            // SAFETY: killpg takes plain integers and has no memory effects. At worst the group is gone.
-            unsafe { libc::killpg(group, libc::SIGKILL) };
+            proc::kill_group(group);
         }
     }
 
@@ -98,7 +98,7 @@ pub async fn run(job: Job) -> anyhow::Result<ShellReply> {
             )
         }
     })?;
-    let mut group = GroupKill(child.id().and_then(|pid| i32::try_from(pid).ok()));
+    let mut group = GroupKill(child.id());
     let stdout = child.stdout.take().context("bash has no stdout pipe")?;
     let stderr = child.stderr.take().context("bash has no stderr pipe")?;
     let (mut out, mut err) = (Capture::default(), Capture::default());

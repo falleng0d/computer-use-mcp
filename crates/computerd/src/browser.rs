@@ -15,6 +15,8 @@ use tokio::{
 };
 use tracing::{info, warn};
 
+#[cfg(target_os = "linux")]
+use crate::proc;
 use crate::{cookie_sync, devtools, env, profile, workdir};
 
 const CHROMIUM: &str = "chromium";
@@ -290,9 +292,8 @@ impl Browser {
 
 #[cfg(target_os = "linux")]
 fn ask_to_quit(child: &Child) {
-    if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
-        // SAFETY: kill takes plain integers and has no memory effects. At worst the process is gone.
-        unsafe { libc::kill(pid, libc::SIGTERM) };
+    if let Some(pid) = child.id() {
+        proc::terminate(pid);
     }
 }
 

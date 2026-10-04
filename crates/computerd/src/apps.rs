@@ -1,6 +1,15 @@
-//! Finding the program an application name stands for.
+//! Finding the program an application name stands for, and starting it on a screen.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+};
+
+use tokio::process::{Child, Command};
+
+#[cfg(target_os = "linux")]
+use crate::proc;
+use crate::{env, workdir};
 
 const BROWSER_NAMES: [&str; 5] = [
     "browser",
@@ -204,6 +213,72 @@ pub fn executable_exists(name: &str, path_var: Option<&std::ffi::OsStr>) -> bool
         .into_iter()
         .flat_map(std::env::split_paths)
         .any(|dir| is_file(&dir.join(name)))
+}
+
+/// Resolves an application name using the installed `.desktop` files and the daemon's `PATH`.
+pub fn find_app(name: &str, uri: Option<&str>, home: &Path) -> Option<App> {
+    let mut entries = Vec::new();
+    for dir in desktop_dirs(home) {
+        let Ok(files) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            let Some(id) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".desktop"))
+            else {
+                continue;
+            };
+            if let Ok(text) = std::fs::read_to_string(&path)
+                && let Some(entry) = parse_desktop(id, &text)
+            {
+                entries.push(entry);
+            }
+        }
+    }
+    let path_var = std::env::var_os("PATH");
+    resolve(name, &entries, uri, |program| {
+        executable_exists(program, path_var.as_deref())
+    })
+}
+
+/// Starts `argv` on screen `display` in its own process group, in `cwd` or home when that is gone.
+///
+/// The program is killed when the returned child is dropped.
+pub fn spawn(argv: &[String], cwd: &Path, display: u8) -> std::io::Result<Child> {
+    let dir = if cwd.is_dir() {
+        cwd.to_path_buf()
+    } else {
+        workdir::home_dir()
+    };
+    let mut command = Command::new(&argv[0]);
+    command
+        .args(&argv[1..])
+        .env_clear()
+        .envs(env::from_process(Some(display)))
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    command.spawn()
+}
+
+/// Kills the process group an application was started in.
+#[cfg(target_os = "linux")]
+pub fn kill_group(app: &mut Child) {
+    if let Some(group) = app.id() {
+        proc::kill_group(group);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn kill_group(app: &mut Child) {
+    let _ = app.start_kill();
 }
 
 #[cfg(test)]

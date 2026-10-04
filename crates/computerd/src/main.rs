@@ -23,7 +23,10 @@ mod key;
 )]
 mod keys;
 mod liveness;
+mod numbers;
 mod plan;
+#[cfg(target_os = "linux")]
+mod proc;
 mod profile;
 mod screen;
 mod sessions;

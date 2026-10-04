@@ -21,13 +21,11 @@ use crate::{
     frames::{self, FrameTracker},
     guard::{LoopGuard, Outcome},
     key,
+    numbers::{FIRST_SCREEN, LAST_SCREEN, Lease},
     plan::{self, Input, Step, WindowInfo},
     workdir,
     x11::Capturer,
 };
-
-pub const FIRST_SCREEN: u8 = 1;
-pub const LAST_SCREEN: u8 = 16;
 
 pub const XVNC_FIRST_PORT: u16 = 5900;
 const FLUXBOX_INIT: &str = "/etc/computerd/fluxbox-init";
@@ -78,47 +76,6 @@ impl ScreenError {
                 "action {number} of {total} failed, the {ran} before it already ran"
             ))),
         }
-    }
-}
-
-/// Lowest screen number from [`FIRST_SCREEN`] to [`LAST_SCREEN`] that is not in `used`.
-pub fn lowest_free(used: &BTreeSet<u8>) -> Option<u8> {
-    (FIRST_SCREEN..=LAST_SCREEN).find(|number| !used.contains(number))
-}
-
-/// The screen numbers in use. A [`Lease`] frees its number when dropped.
-#[derive(Debug, Clone, Default)]
-pub struct Numbers(Arc<Mutex<BTreeSet<u8>>>);
-
-#[derive(Debug)]
-pub struct Lease {
-    numbers: Numbers,
-    number: u8,
-}
-
-impl Numbers {
-    /// Takes the lowest free number, or `None` when all 16 screens exist.
-    pub fn lease(&self) -> Option<Lease> {
-        let mut used = self
-            .0
-            .lock()
-            .expect("the screen number lock is only held for short set updates");
-        let number = lowest_free(&used)?;
-        used.insert(number);
-        Some(Lease {
-            numbers: self.clone(),
-            number,
-        })
-    }
-}
-
-impl Drop for Lease {
-    fn drop(&mut self) {
-        self.numbers
-            .0
-            .lock()
-            .expect("the screen number lock is only held for short set updates")
-            .remove(&self.number);
     }
 }
 
@@ -251,7 +208,7 @@ struct Source {
 impl Screen {
     /// Starts `Xvnc` and Fluxbox on the leased number and waits until both are usable.
     pub async fn open(lease: Lease, size: ScreenSize) -> Result<Self> {
-        let number = lease.number;
+        let number = lease.number();
         let mut processes = Processes::start_xvnc(number, size)?;
         match Self::bring_up(&mut processes, number, size).await {
             Ok(source) => {
@@ -465,7 +422,7 @@ impl Screen {
             browser.close().await;
         }
         for mut app in std::mem::take(&mut self.apps) {
-            kill_group(&mut app);
+            apps::kill_group(&mut app);
             let _ = tokio::time::timeout(STOP_TIMEOUT, app.wait()).await;
         }
         self.processes.stop().await;
@@ -553,10 +510,11 @@ impl Screen {
         let home = workdir::home_dir();
         let name = application.to_owned();
         let wanted_uri = uri.map(str::to_owned);
-        let app =
-            tokio::task::spawn_blocking(move || find_app(&name, wanted_uri.as_deref(), &home))
-                .await
-                .context("looking for the application")?;
+        let app = tokio::task::spawn_blocking(move || {
+            apps::find_app(&name, wanted_uri.as_deref(), &home)
+        })
+        .await
+        .context("looking for the application")?;
         let windows = self.windows().await?;
         let in_window = |class: &str| plan::pick_window(&windows, class).map(|window| window.id);
         match app {
@@ -708,24 +666,7 @@ impl Screen {
         self.apps
             .retain_mut(|app| matches!(app.try_wait(), Ok(None)));
         let before = self.window_ids().await?;
-        let dir = if cwd.is_dir() {
-            cwd.to_path_buf()
-        } else {
-            workdir::home_dir()
-        };
-        let mut command = Command::new(&argv[0]);
-        command
-            .args(&argv[1..])
-            .env_clear()
-            .envs(env::from_process(Some(self.number)))
-            .current_dir(dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        command.process_group(0);
-        let mut child = command.spawn().map_err(|error| {
+        let mut child = apps::spawn(&argv, cwd, self.number).map_err(|error| {
             ScreenError::Rejected(format!("cannot start {label} ({}): {error}", argv[0]))
         })?;
         if let Some(status) = self.wait_for_window(&before, Some(&mut child)).await? {
@@ -754,49 +695,6 @@ async fn check_file(path: &Path) -> Result<(), ScreenError> {
             path.display()
         ))),
     }
-}
-
-/// Kills the process group an application was started in.
-#[cfg(target_os = "linux")]
-fn kill_group(app: &mut Child) {
-    if let Some(group) = app.id().and_then(|pid| i32::try_from(pid).ok()) {
-        // SAFETY: killpg takes plain integers and has no memory effects. At worst the group is gone.
-        unsafe { libc::killpg(group, libc::SIGKILL) };
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn kill_group(app: &mut Child) {
-    let _ = app.start_kill();
-}
-
-/// Resolves an application name using the installed `.desktop` files and the daemon's `PATH`.
-fn find_app(name: &str, uri: Option<&str>, home: &Path) -> Option<App> {
-    let mut entries = Vec::new();
-    for dir in apps::desktop_dirs(home) {
-        let Ok(files) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for file in files.flatten() {
-            let path = file.path();
-            let Some(id) = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .and_then(|name| name.strip_suffix(".desktop"))
-            else {
-                continue;
-            };
-            if let Ok(text) = std::fs::read_to_string(&path)
-                && let Some(entry) = apps::parse_desktop(id, &text)
-            {
-                entries.push(entry);
-            }
-        }
-    }
-    let path_var = std::env::var_os("PATH");
-    apps::resolve(name, &entries, uri, |program| {
-        apps::executable_exists(program, path_var.as_deref())
-    })
 }
 
 fn no_window(application: &str, open: &[String]) -> ScreenError {
@@ -879,25 +777,5 @@ where
             ))));
         }
         tokio::time::sleep(POLL_INTERVAL).await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn numbers_are_reused_lowest_first_and_run_out_after_sixteen() {
-        let numbers = Numbers::default();
-        let mut leases: Vec<Lease> = (FIRST_SCREEN..=LAST_SCREEN)
-            .map(|_| numbers.lease().unwrap())
-            .collect();
-        assert_eq!(leases[0].number, 1);
-        assert_eq!(leases[15].number, 16);
-        assert!(numbers.lease().is_none());
-
-        drop(leases.remove(4));
-        drop(leases.remove(1));
-        assert_eq!(numbers.lease().unwrap().number, 2);
     }
 }

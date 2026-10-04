@@ -23,7 +23,8 @@ use crate::{
     exec, files,
     hub::Hub,
     liveness::{self, EndReason, Liveness},
-    screen::{Numbers, Screen, ScreenError},
+    numbers::Numbers,
+    screen::{Screen, ScreenError},
     workdir,
 };
 
