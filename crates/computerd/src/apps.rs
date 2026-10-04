@@ -21,12 +21,12 @@ const BROWSER_NAMES: [&str; 5] = [
 const TERMINAL_NAMES: [&str; 2] = ["terminal", "xterm"];
 const TERMINAL: &str = "xterm";
 const OFFICE_PROGRAM: &str = "soffice";
-/// Names for the office apps: the name, the label, and the `soffice` flag that opens it.
-const OFFICE_APPS: [(&str, &str, &str); 4] = [
-    ("libreoffice", "LibreOffice", "--start"),
-    ("writer", "LibreOffice Writer", "--writer"),
-    ("calc", "LibreOffice Calc", "--calc"),
-    ("impress", "LibreOffice Impress", "--impress"),
+/// Names for the office apps: the name, the label, and the `soffice` flag that opens it (none opens the Start Center).
+const OFFICE_APPS: [(&str, &str, Option<&str>); 4] = [
+    ("libreoffice", "LibreOffice", None),
+    ("writer", "LibreOffice Writer", Some("--writer")),
+    ("calc", "LibreOffice Calc", Some("--calc")),
+    ("impress", "LibreOffice Impress", Some("--impress")),
 ];
 
 /// An installed application that has a `.desktop` file.
@@ -180,8 +180,8 @@ fn resolve(
     {
         return Some(App::Command {
             label: (*label).to_owned(),
-            argv: [OFFICE_PROGRAM, flag]
-                .into_iter()
+            argv: std::iter::once(OFFICE_PROGRAM)
+                .chain(*flag)
                 .map(str::to_owned)
                 .chain(uri.map(str::to_owned))
                 .collect(),
@@ -377,6 +377,13 @@ mod tests {
             Some(App::Command {
                 label: "LibreOffice Calc".to_owned(),
                 argv: ["soffice", "--calc", "a.csv"].map(str::to_owned).to_vec()
+            })
+        );
+        assert_eq!(
+            at("LibreOffice"),
+            Some(App::Command {
+                label: "LibreOffice".to_owned(),
+                argv: vec!["soffice".to_owned()]
             })
         );
         assert_eq!(resolve("writer", &entries, None, |_| false), None);
