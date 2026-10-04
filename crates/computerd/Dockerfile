@@ -35,7 +35,7 @@ ARG NODE_MAJOR=24
 # apt lists stay in the image so `sudo apt-get install` works without an update first.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        locales tzdata tigervnc-standalone-server fluxbox xterm chromium xdg-utils shared-mime-info xkb-data x11-utils imagemagick hsetroot \
+        locales tzdata tigervnc-standalone-server fluxbox tint2 xterm chromium xdg-utils shared-mime-info xkb-data x11-utils imagemagick hsetroot \
         fonts-dejavu-core fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
         sudo ca-certificates curl git openssh-client jq ripgrep xclip xsel \
         python3 python3-pip python3-venv ruby build-essential fish \
@@ -69,6 +69,12 @@ LABEL org.opencontainers.image.version="${COMPUTER_USE_MCP_VERSION}"
 COPY crates/computerd/image/fluxbox-init /etc/computerd/fluxbox-init
 COPY crates/computerd/image/fluxbox-menu /etc/computerd/fluxbox-menu
 COPY crates/computerd/image/fluxbox-apps /etc/computerd/fluxbox-apps
+COPY crates/computerd/image/fluxbox-overlay /etc/computerd/fluxbox-overlay
+RUN cp -r /usr/share/fluxbox/styles/Squared_for_Debian /etc/computerd/style \
+    && sed -i -e 's|^background:.*|background: flat|' -e 's|^background.pixmap:.*|background.color: #2b2b2b|' /etc/computerd/style/theme.cfg
+COPY crates/computerd/image/tint2rc /etc/computerd/tint2rc
+COPY crates/computerd/image/computer-terminal.desktop /usr/share/applications/computer-terminal.desktop
+RUN sed -i -e 's/[[:space:]]*$//' -e '1s/^\o357\o273\o277//' /etc/computerd/tint2rc /etc/computerd/fluxbox-overlay /usr/share/applications/computer-*.desktop
 COPY crates/computerd/image/chromium-policy.json /etc/chromium/policies/managed/computer-use.json
 COPY crates/computerd/image/computer-browser.desktop /usr/share/applications/computer-browser.desktop
 COPY crates/computerd/image/mimeapps.list /etc/xdg/mimeapps.list

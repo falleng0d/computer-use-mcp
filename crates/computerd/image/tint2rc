@@ -1,0 +1,23 @@
+rounded = 14
+border_width = 1
+background_color = #e8e8e8 100
+border_color = #c8c8c8 100
+
+panel_items = L
+panel_monitor = all
+panel_position = bottom center horizontal
+panel_size = 120 52
+panel_margin = 0 8
+panel_padding = 10 6 10
+panel_background_id = 1
+wm_menu = 0
+panel_layer = bottom
+strut_policy = none
+
+launcher_padding = 6 4 12
+launcher_background_id = 0
+launcher_icon_size = 36
+launcher_icon_theme = hicolor
+launcher_tooltip = 1
+launcher_item_app = /usr/share/applications/computer-browser.desktop
+launcher_item_app = /usr/share/applications/computer-terminal.desktop
