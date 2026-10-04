@@ -24,6 +24,10 @@ The project has three Rust crates:
 
 ## Install
 
+With Rust 1.99 or newer, run `cargo install computer-use-mcp`. It builds the same release binary, which uses the image of its own version.
+
+Or use a prebuilt binary:
+
 1. Download the archive for your platform from the [releases page](https://github.com/falleng0d/computer-use-mcp/releases). Builds exist for Windows x64 (`x86_64-pc-windows-msvc`) and macOS Apple Silicon (`aarch64-apple-darwin`).
 2. Put `computer-use-mcp` on your `PATH`.
 3. On macOS, the binary is not signed. If you downloaded it with a browser, remove the quarantine flag with `xattr -d com.apple.quarantine computer-use-mcp`.

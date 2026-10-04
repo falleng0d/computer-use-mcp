@@ -9,6 +9,7 @@ Releases are automated with [release-plz](https://release-plz.dev) and GitHub Ac
 3. Merge into `master`. release-plz opens or updates a release PR with the next version and the `CHANGELOG.md` entry.
 4. Review and merge the release PR. release-plz tags `vX.Y.Z` and creates the GitHub release with the changelog notes.
 5. The tag starts `release.yml`. It builds the Windows and macOS binaries and uploads them, with `SHA256SUMS.txt`, to the release. It pushes `ghcr.io/falleng0d/computer-use-mcp:X.Y.Z` and `:latest` for `linux/amd64` and `linux/arm64`.
+6. After the image is pushed, `release.yml` publishes `computer-protocol`, `computer-transfer`, and `computer-use-mcp` to crates.io, in that order, with the `CARGO_REGISTRY_TOKEN` secret. Versions already on crates.io are skipped, so a rebuild is safe. `computerd` is not published. release-plz itself doesn't publish (`publish = false`).
 
 Version bumps follow the commits since the last tag:
 
@@ -42,6 +43,16 @@ just gh-rebuild-release v0.2.0
 ```
 
 Uploads use `--clobber`, so a rebuild replaces existing assets.
+
+## One-time setup: crates.io token
+
+Create a crates.io API token with the `publish-update` scope (and `publish-new` until all three crates exist), then store it:
+
+```sh
+gh secret set CARGO_REGISTRY_TOKEN --repo falleng0d/computer-use-mcp
+```
+
+Pre-release tags are not published to crates.io. A crates.io build counts as a release build because Cargo adds `.cargo_vcs_info.json` to packaged crates (`crates/computer-protocol/build.rs`), so `cargo install` uses the image of its own version.
 
 ## One-time setup: GitHub App for release-plz
 
