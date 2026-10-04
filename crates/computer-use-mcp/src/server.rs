@@ -1195,7 +1195,7 @@ mod tests {
             text_of(&opened)
         );
         assert!(shell("pgrep -x chromium").await.contains("exit code: 0"));
-        let profile = "/home/computer/.local/share/computer-use/chromium/screen-1";
+        let profile = "/tmp/computer-use/chromium/screen-1";
         assert!(
             shell(&format!("test -d {profile}"))
                 .await
@@ -1229,6 +1229,103 @@ mod tests {
         }
         eprintln!("screen closed {} ms after end", ended.elapsed().as_millis());
         assert!(after.contains("--- stdout ---\n0\n0\n"), "{after}");
+    }
+
+    const COOKIE_SERVER: &str = r"cat > /tmp/cookies.py <<'EOF'
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        if self.path == '/set':
+            self.send_header('Set-Cookie', 'a=1; HttpOnly; Max-Age=86400; Path=/')
+            self.send_header('Set-Cookie', 's=2; Path=/')
+            self.send_header('Set-Cookie', 'p=3; Secure; Partitioned; SameSite=None; Path=/')
+        if self.path == '/clear':
+            self.send_header('Set-Cookie', 'a=; Max-Age=0; Path=/')
+        self.send_header('Content-Type', 'text/html')
+        self.end_headers()
+        self.wfile.write(b'ok')
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer(('127.0.0.1', 8099), H).serve_forever()
+EOF
+cat > /tmp/cookies.js <<'EOF'
+const port = 9221 + Number(process.argv[2]);
+(async () => {
+  const v = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+  const ws = new WebSocket(v.webSocketDebuggerUrl);
+  ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'Storage.getCookies' }));
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.id === 1) {
+      const names = m.result.cookies.map((c) => c.name + (c.httpOnly ? '!' : '') + (c.partitionKey ? '#' : ''));
+      console.log('names=' + names.sort().join(','));
+      process.exit(0);
+    }
+  };
+})();
+EOF
+setsid python3 /tmp/cookies.py >/dev/null 2>&1 </dev/null &
+sleep 1";
+
+    #[tokio::test]
+    #[ignore = "needs Docker"]
+    async fn cookies_follow_the_user_across_screens_and_into_screens_opened_later() {
+        let (server, _cleanup) = fresh_server();
+        let first = server.start("first").await.unwrap().session;
+        let second = server.start("second").await.unwrap().session;
+        let shell = async |session: &SessionId, command: &str| {
+            let result = server
+                .run_shell(shell_args(session, command, Some(30)))
+                .await
+                .unwrap();
+            text_of(&result)
+        };
+        shell(&first, COOKIE_SERVER).await;
+        let cookies_on =
+            async |screen: u8| shell(&second, &format!("node /tmp/cookies.js {screen}")).await;
+        let wait_for = async |screen: u8, wanted: &str| {
+            let started = std::time::Instant::now();
+            let mut seen = cookies_on(screen).await;
+            while !seen.contains(wanted) && started.elapsed() < Duration::from_secs(20) {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                seen = cookies_on(screen).await;
+            }
+            assert!(
+                seen.contains(wanted),
+                "screen {screen} has {seen}, wanted {wanted}"
+            );
+        };
+
+        server
+            .open(open_args(&second, "http://127.0.0.1:8099/blank"))
+            .await
+            .unwrap();
+        server
+            .open(open_args(&first, "http://127.0.0.1:8099/set"))
+            .await
+            .unwrap();
+        wait_for(2, "names=a!,p#,s\n").await;
+
+        server
+            .open(open_args(&first, "http://127.0.0.1:8099/clear"))
+            .await
+            .unwrap();
+        wait_for(2, "names=p#,s\n").await;
+
+        let third = server.start("third").await.unwrap().session;
+        server
+            .open(open_args(&third, "http://127.0.0.1:8099/blank"))
+            .await
+            .unwrap();
+        assert!(
+            cookies_on(3).await.contains("names=p#,s\n"),
+            "a screen opened later starts with the jar"
+        );
+
+        for session in [&first, &second, &third] {
+            server.end(session.as_str()).await.unwrap();
+        }
     }
 
     #[tokio::test]

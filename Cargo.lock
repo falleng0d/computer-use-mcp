@@ -418,6 +418,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "tower",
  "tracing",

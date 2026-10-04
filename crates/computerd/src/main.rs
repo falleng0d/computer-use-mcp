@@ -3,6 +3,9 @@ mod apps;
 mod bridge;
 mod browser;
 mod cap;
+mod cookie_sync;
+mod cookies;
+mod devtools;
 mod env;
 #[cfg(target_os = "linux")]
 mod exec;
@@ -21,6 +24,7 @@ mod key;
 mod keys;
 mod liveness;
 mod plan;
+mod profile;
 mod screen;
 mod sessions;
 #[cfg(target_os = "linux")]
@@ -81,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
     let base = host_base(std::env::var(HOST_PORT_BASE_ENV).ok().as_deref());
     let sessions = sessions::Sessions::new(hub::Hub::new(base));
     let home = workdir::home_dir();
+    let cookie_sync = cookie_sync::install(cookie_sync::jar_path(&home)).await;
     let key = tokio::task::spawn_blocking(move || key::ensure(&home))
         .await
         .context("preparing the viewer password")?
@@ -111,6 +116,10 @@ async fn main() -> anyhow::Result<()> {
         let stop = stop_reaper.clone();
         tokio::spawn(async move { sessions.reap_until(stop).await })
     };
+    let syncer = {
+        let stop = stop_reaper.clone();
+        tokio::spawn(async move { cookie_sync.run(stop).await })
+    };
     let bridge = tokio::spawn(bridge::serve(
         launcher,
         sessions.clone(),
@@ -127,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
     stop_reaper.cancel();
     reaper.await.context("stopping the session reaper")?;
     bridge.await.context("stopping the browser bridge")?;
+    syncer.await.context("stopping the cookie sync")?;
     viewer.stop().await;
     sessions.close_all().await;
     served

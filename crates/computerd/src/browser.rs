@@ -15,11 +15,10 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::{env, workdir};
+use crate::{cookie_sync, devtools, env, profile, workdir};
 
 const CHROMIUM: &str = "chromium";
 const NO_SANDBOX: &str = "--no-sandbox";
-const PROFILES_DIR: &str = ".local/share/computer-use/chromium";
 const FIRST_DEVTOOLS_PORT: u16 = 9221;
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const READY_POLL: Duration = Duration::from_millis(100);
@@ -27,20 +26,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(10);
 const QUIT_TIMEOUT: Duration = Duration::from_secs(8);
 const KILL_TIMEOUT: Duration = Duration::from_secs(5);
-const LOCK_FILES: [&str; 3] = ["SingletonLock", "SingletonCookie", "SingletonSocket"];
+const START_PAGE: &str = "about:blank";
 
 /// File types Chromium shows itself, so no other viewer is needed for them.
 const BROWSER_EXTENSIONS: [&str; 15] = [
     "html", "htm", "xhtml", "pdf", "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "txt",
     "json", "xml",
 ];
-
-/// Folder that holds the Chromium profile of screen `number`.
-///
-/// The profile belongs to the screen number, so a later session on the same number finds its logins.
-pub fn profile_dir(home: &Path, number: u8) -> PathBuf {
-    home.join(PROFILES_DIR).join(format!("screen-{number}"))
-}
 
 /// Port of the `DevTools` endpoint of screen `number`, on the container's loopback only.
 pub fn devtools_port(number: u8) -> u16 {
@@ -143,21 +135,23 @@ pub fn file_url(path: &Path) -> String {
 pub struct Browser {
     child: Child,
     profile: PathBuf,
+    number: u8,
     devtools_port: u16,
 }
 
 impl Browser {
     /// Starts Chromium on screen `number` and waits until its `DevTools` endpoint answers.
     pub async fn start(number: u8, size: ScreenSize, url: Option<&str>) -> Result<Self> {
-        let profile = profile_dir(&workdir::home_dir(), number);
+        let home = workdir::home_dir();
+        let profile = profile::scratch_dir(number);
         let prepared = profile.clone();
-        tokio::task::spawn_blocking(move || prepare_profile(&prepared))
+        tokio::task::spawn_blocking(move || prepare_profile(&home, &prepared))
             .await
             .context("preparing the browser profile")?
             .context("preparing the browser profile")?;
         let devtools_port = devtools_port(number);
         let child = Command::new(CHROMIUM)
-            .args(command_line(&profile, number, size, url))
+            .args(command_line(&profile, number, size, Some(START_PAGE)))
             .env_clear()
             .envs(env::from_process(Some(number)))
             .stdin(Stdio::null())
@@ -169,11 +163,24 @@ impl Browser {
         let mut browser = Self {
             child,
             profile,
+            number,
             devtools_port,
         };
         if let Err(error) = browser.wait_ready().await {
             browser.close().await;
             return Err(error);
+        }
+        if let Some(sync) = cookie_sync::shared() {
+            sync.attach(number, devtools_port).await;
+        }
+        if let Some(url) = url
+            && let Err(error) = devtools::navigate_first_tab(devtools_port, url).await
+        {
+            warn!(screen = number, %error, "could not load the page in the first tab, opening a new one");
+            if let Err(error) = browser.open_url(url, number).await {
+                browser.close().await;
+                return Err(error);
+            }
         }
         info!(screen = number, devtools_port, "browser started");
         Ok(browser)
@@ -238,11 +245,16 @@ impl Browser {
         }
     }
 
-    /// Asks Chromium to quit so it saves its profile, and kills it when it does not.
+    /// Reads the cookies one last time, asks Chromium to quit so it saves its profile, and kills
+    /// it when it does not. A clean quit hands the profile's shared files to the template.
     pub async fn close(mut self) {
+        if let Some(sync) = cookie_sync::shared() {
+            sync.detach(self.number).await;
+        }
         ask_to_quit(&self.child);
         let quit = tokio::time::timeout(QUIT_TIMEOUT, self.child.wait()).await;
-        if quit.is_err() {
+        let quit_cleanly = quit.is_ok();
+        if !quit_cleanly {
             warn!(
                 devtools_port = self.devtools_port,
                 "browser did not quit, killing it"
@@ -257,7 +269,17 @@ impl Browser {
                 warn!("browser did not exit after being killed");
             }
         }
-        clear_locks(&self.profile);
+        let (home, scratch, number) = (workdir::home_dir(), self.profile.clone(), self.number);
+        let finished = tokio::task::spawn_blocking(move || {
+            if quit_cleanly && let Err(error) = profile::save_to_template(&home, &scratch, number) {
+                warn!(screen = number, %error, "could not save the browser profile to the template");
+            }
+            profile::discard(&scratch);
+        })
+        .await;
+        if let Err(error) = finished {
+            warn!(%error, "saving the browser profile failed");
+        }
     }
 }
 
@@ -271,12 +293,6 @@ fn ask_to_quit(child: &Child) {
 
 #[cfg(not(target_os = "linux"))]
 fn ask_to_quit(_child: &Child) {}
-
-fn clear_locks(profile: &Path) {
-    for name in LOCK_FILES {
-        let _ = std::fs::remove_file(profile.join(name));
-    }
-}
 
 /// Process id in the `SingletonLock` link target, which Chromium writes as `<host>-<pid>`.
 fn lock_pid(target: &str) -> Option<u32> {
@@ -297,21 +313,25 @@ fn lock_holder_alive(profile: &Path) -> bool {
     String::from_utf8_lossy(&cmdline).contains(&*profile.to_string_lossy())
 }
 
-/// Creates the profile folder and removes lock files a killed Chromium left behind.
+/// Replaces the scratch profile with a fresh clone of the template in `home`.
 ///
 /// # Errors
 ///
-/// Fails when a Chromium that is still running holds the profile.
-fn prepare_profile(profile: &Path) -> Result<()> {
-    std::fs::create_dir_all(profile)?;
+/// Fails when a Chromium that is still running holds the scratch profile.
+fn prepare_profile(home: &Path, profile: &Path) -> Result<()> {
     if lock_holder_alive(profile) {
         bail!(
             "a Chromium from an earlier session is still running on {}, close it or wait for it to exit",
             profile.display()
         );
     }
-    clear_locks(profile);
-    Ok(())
+    match std::fs::remove_dir_all(profile) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("clearing the scratch profile"),
+    }
+    std::fs::create_dir_all(profile)?;
+    profile::clone_template(home, profile).context("cloning the template profile")
 }
 
 #[cfg(test)]
@@ -319,13 +339,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_screen_gets_its_own_profile_in_home_and_its_own_devtools_port() {
-        let home = Path::new("/home/computer");
-        assert_eq!(
-            profile_dir(home, 3),
-            Path::new("/home/computer/.local/share/computer-use/chromium/screen-3")
-        );
-        assert_ne!(profile_dir(home, 1), profile_dir(home, 2));
+    fn each_screen_gets_its_own_devtools_port() {
         assert_eq!(devtools_port(1), 9222);
         assert_eq!(devtools_port(16), 9237);
     }
@@ -391,16 +405,23 @@ mod tests {
     }
 
     #[test]
-    fn preparing_a_profile_removes_stale_locks_and_keeps_the_rest() {
-        let dir = std::env::temp_dir().join(format!("computerd-profile-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        for name in ["SingletonLock", "SingletonSocket", "Preferences"] {
-            std::fs::write(dir.join(name), b"x").unwrap();
+    fn preparing_a_profile_replaces_leftovers_with_a_clone_of_the_template() {
+        let root = std::env::temp_dir().join(format!("computerd-profile-{}", std::process::id()));
+        let (home, scratch) = (root.join("home"), root.join("scratch"));
+        let template = profile::template_dir(&home).join("Default");
+        std::fs::create_dir_all(&template).unwrap();
+        std::fs::write(template.join("Bookmarks"), b"marks").unwrap();
+        std::fs::create_dir_all(scratch.join("Default")).unwrap();
+        for name in ["SingletonLock", "Default/Cookies", "Default/Bookmarks"] {
+            std::fs::write(scratch.join(name), b"stale").unwrap();
         }
-        prepare_profile(&dir).unwrap();
-        assert!(!dir.join("SingletonLock").exists());
-        assert!(!dir.join("SingletonSocket").exists());
-        assert!(dir.join("Preferences").exists());
-        std::fs::remove_dir_all(&dir).unwrap();
+        prepare_profile(&home, &scratch).unwrap();
+        assert!(!scratch.join("SingletonLock").exists());
+        assert!(!scratch.join("Default/Cookies").exists());
+        assert_eq!(
+            std::fs::read(scratch.join("Default/Bookmarks")).unwrap(),
+            b"marks"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
