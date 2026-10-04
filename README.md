@@ -10,7 +10,7 @@ An MCP server that gives AI agents a computer. Any MCP client, such as Claude Co
 - When an agent starts the MCP server, the server starts the container if it is stopped, or creates it if it does not exist. The server never stops the container. The only time it removes one is a stopped container on an older image than the binary's, which it creates again on the newer image with the same home volume and the same ports. It never touches a running container and never moves the computer to an older image. To upgrade, run `docker stop` on the computer and call `start_computer`. `computer-use-mcp info` shows whether an upgrade is pending.
 - Every agent connected through the MCP server sees and controls the same desktop.
 - Files in the volume survive container restarts and container deletion. Only you stop or delete the computer, with `docker stop` or `docker rm`.
-- The computer is Debian 13 with Python 3, uv, Node.js 24 (LTS), Git, `gh`, the AWS CLI v2, Ruby, fish (bash stays the default shell), build tools, ripgrep, ImageMagick, clipboard tools, and fonts for Latin, CJK, and emoji.
+- The computer is Debian 13 with Python 3, uv, Node.js 24 (LTS), Git, `gh`, the AWS CLI v2, Ruby, fish (bash stays the default shell), build tools, ripgrep, ImageMagick, LibreOffice (Writer, Calc, Impress), clipboard tools, and fonts for Latin, CJK, and emoji.
 - The user `computer` has passwordless `sudo`, so agents can `sudo apt-get install` more. Only home survives when the container is recreated, so system packages are lost then. `npm install -g` and `pip install` go to `~/.local` (first on `PATH`) and survive.
 - The container logs print the viewer link and the VNC password, so you can reopen a closed view.
 

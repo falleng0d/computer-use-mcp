@@ -1,4 +1,10 @@
 [begin] (Computer)
   [exec] (Browser) {computerd open-browser}
   [exec] (Terminal) {xterm}
+
+  [exec] (Writer) {soffice --writer}
+
+  [exec] (Calc) {soffice --calc}
+
+  [exec] (Impress) {soffice --impress}
 [end]

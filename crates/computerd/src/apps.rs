@@ -20,6 +20,14 @@ const BROWSER_NAMES: [&str; 5] = [
 ];
 const TERMINAL_NAMES: [&str; 2] = ["terminal", "xterm"];
 const TERMINAL: &str = "xterm";
+const OFFICE_PROGRAM: &str = "soffice";
+/// Names for the office apps: the name, the label, and the `soffice` flag that opens it.
+const OFFICE_APPS: [(&str, &str, &str); 4] = [
+    ("libreoffice", "LibreOffice", "--start"),
+    ("writer", "LibreOffice Writer", "--writer"),
+    ("calc", "LibreOffice Calc", "--calc"),
+    ("impress", "LibreOffice Impress", "--impress"),
+];
 
 /// An installed application that has a `.desktop` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +174,18 @@ fn resolve(
     }
     if TERMINAL_NAMES.contains(&lower.as_str()) {
         return Some(App::Terminal);
+    }
+    if let Some((_, label, flag)) = OFFICE_APPS.iter().find(|(alias, ..)| *alias == lower)
+        && on_path(OFFICE_PROGRAM)
+    {
+        return Some(App::Command {
+            label: (*label).to_owned(),
+            argv: [OFFICE_PROGRAM, flag]
+                .into_iter()
+                .map(str::to_owned)
+                .chain(uri.map(str::to_owned))
+                .collect(),
+        });
     }
     let lower = lower.strip_suffix(".desktop").unwrap_or(&lower);
     let entry = entries
@@ -326,7 +346,7 @@ mod tests {
             entry("chromium", "Chromium", "/usr/bin/chromium %U"),
             entry("eog", "Image Viewer", "eog %U"),
         ];
-        let on_path = |name: &str| name == "htop" || name == "/opt/tool";
+        let on_path = |name: &str| name == "htop" || name == "/opt/tool" || name == "soffice";
         let at = |name| resolve(name, &entries, None, on_path);
         assert_eq!(at("Browser"), Some(App::Browser));
         assert_eq!(at("chromium"), Some(App::Browser));
@@ -352,6 +372,14 @@ mod tests {
                 argv: vec!["htop".to_owned(), "a".to_owned()]
             })
         );
+        assert_eq!(
+            resolve(" Calc ", &entries, Some("a.csv"), on_path),
+            Some(App::Command {
+                label: "LibreOffice Calc".to_owned(),
+                argv: ["soffice", "--calc", "a.csv"].map(str::to_owned).to_vec()
+            })
+        );
+        assert_eq!(resolve("writer", &entries, None, |_| false), None);
         assert!(at("/opt/tool").is_some());
         assert_eq!(at("tool"), None);
         assert_eq!(at("nope"), None);

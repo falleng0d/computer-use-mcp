@@ -1,3 +1,7 @@
 [app] (class=Chromium)
   [Maximized] {yes}
 [end]
+
+[app] (class=libreoffice.*)
+  [Maximized] {yes}
+[end]

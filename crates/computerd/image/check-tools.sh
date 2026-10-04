@@ -18,6 +18,7 @@ check xclip -version
 check xdpyinfo -version
 check xterm -version
 check chromium --version
+check soffice --version
 check xdg-open --version
 check Xvnc -help
 check python3 -m venv --help
@@ -29,4 +30,11 @@ case "$(bash -lc 'echo $PATH')" in
 esac
 [ "$(fc-match -f '%{family}' 'Noto Color Emoji')" = "Noto Color Emoji" ] || { echo "emoji font missing" >&2; failed=1; }
 fc-list ':lang=ja' family | grep -q CJK || { echo "CJK font missing" >&2; failed=1; }
+office_dir=$(mktemp -d)
+printf 'name,count
+widgets,3
+' > "$office_dir/sample.csv"
+soffice -env:UserInstallation="file://$office_dir/profile" --headless --convert-to pdf --outdir "$office_dir" "$office_dir/sample.csv" >/dev/null 2>&1
+head -c 4 "$office_dir/sample.pdf" 2>/dev/null | grep -q '%PDF' || { echo "soffice cannot convert a document to PDF" >&2; failed=1; }
+rm -rf "$office_dir"
 exit "$failed"
