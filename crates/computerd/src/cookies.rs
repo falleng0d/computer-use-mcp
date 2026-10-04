@@ -13,6 +13,8 @@ const EXPIRY_CAP_SECS: f64 = 400.0 * 86_400.0;
 const EXPIRY_CAP_SLACK_SECS: f64 = 2.0 * 86_400.0;
 /// How long the jar remembers that a cookie was deleted.
 pub const TOMBSTONE_TTL_SECS: f64 = 30.0 * 86_400.0;
+/// The most entries the jar keeps. The oldest changes go first.
+const MAX_ENTRIES: usize = 5000;
 const JAR_VERSION: u32 = 1;
 /// Fields `Storage.setCookies` accepts. The others `getCookies` reports are derived.
 const PARAM_FIELDS: [&str; 10] = [
@@ -133,6 +135,31 @@ pub fn diff(previous: &Snapshot, now_cookies: &Snapshot, now: f64) -> Changes {
     changes
 }
 
+/// What a page changed in a browser between a read and the read after a push of `pushed`.
+///
+/// The push itself is not a change, but a different value for a pushed cookie is.
+pub fn changes_after_push(
+    before: &Snapshot,
+    after: &Snapshot,
+    pushed: &Pending,
+    now: f64,
+) -> Changes {
+    let mut changes = diff(before, after, now);
+    changes.upserts.retain(|cookie| {
+        !pushed
+            .set
+            .iter()
+            .any(|sent| Key::of(sent) == Key::of(cookie) && same(sent, cookie, now))
+    });
+    changes.removed.retain(|cookie| {
+        !pushed
+            .delete
+            .iter()
+            .any(|sent| Key::of(sent) == Key::of(cookie))
+    });
+    changes
+}
+
 /// The `Storage.setCookies` parameter that writes `cookie`.
 pub fn to_param(cookie: &Value) -> Value {
     let mut param = Map::new();
@@ -224,13 +251,19 @@ impl Jar {
         serde_json::to_string(&file).expect("a jar is plain JSON data")
     }
 
-    /// Whether something changed since the last [`Jar::mark_saved`].
-    pub fn is_dirty(&self) -> bool {
-        self.dirty
+    /// The text to save, or `None` when nothing changed. Call [`Jar::mark_unsaved`] when the
+    /// write fails.
+    pub fn take_unsaved(&mut self, now: f64) -> Option<String> {
+        self.prune(now);
+        if !self.dirty {
+            return None;
+        }
+        self.dirty = false;
+        Some(self.to_json())
     }
 
-    pub fn mark_saved(&mut self) {
-        self.dirty = false;
+    pub fn mark_unsaved(&mut self) {
+        self.dirty = true;
     }
 
     /// Folds the changes one browser made at time `at` into the jar. The newest change wins.
@@ -274,6 +307,23 @@ impl Jar {
                 !is_expired(&entry.cookie, now)
             }
         });
+        if self.entries.len() > MAX_ENTRIES {
+            let mut ages: Vec<f64> = self
+                .entries
+                .values()
+                .map(|entry| entry.changed_at)
+                .collect();
+            ages.sort_by(f64::total_cmp);
+            let cutoff = ages[self.entries.len() - MAX_ENTRIES];
+            let mut excess = self.entries.len() - MAX_ENTRIES;
+            self.entries.retain(|_, entry| {
+                let drop = excess > 0 && entry.changed_at < cutoff;
+                if drop {
+                    excess -= 1;
+                }
+                !drop
+            });
+        }
         if self.entries.len() != before {
             self.dirty = true;
         }
@@ -494,6 +544,67 @@ mod tests {
     }
 
     #[test]
+    fn a_page_change_between_a_push_and_the_read_after_it_still_counts() {
+        let before = snap(vec![
+            cookie("keep", "1", NOW + DAY),
+            cookie("gone", "1", NOW + DAY),
+        ]);
+        let pushed = Pending {
+            set: vec![
+                cookie("new", "1", NOW + DAY),
+                cookie("raced", "1", NOW + DAY),
+            ],
+            delete: vec![cookie("gone", "1", NOW + DAY)],
+        };
+        let after = snap(vec![
+            cookie("keep", "2", NOW + DAY),
+            cookie("new", "1", NOW + DAY),
+            cookie("raced", "other", NOW + DAY),
+            cookie("page", "1", NOW + DAY),
+        ]);
+        let changes = changes_after_push(&before, &after, &pushed, NOW);
+        let names: Vec<_> = changes.upserts.iter().map(|c| c["name"].clone()).collect();
+        assert_eq!(names, vec![json!("keep"), json!("page"), json!("raced")]);
+        assert_eq!(changes.removed, Vec::<Value>::new());
+    }
+
+    #[test]
+    fn a_pushed_deletion_is_not_reported_as_a_removal_but_a_page_deletion_is() {
+        let before = snap(vec![
+            cookie("pushed", "1", NOW + DAY),
+            cookie("page", "1", NOW + DAY),
+        ]);
+        let pushed = Pending {
+            set: vec![],
+            delete: vec![cookie("pushed", "1", NOW + DAY)],
+        };
+        let changes = changes_after_push(&before, &Snapshot::new(), &pushed, NOW);
+        assert_eq!(changes.removed, vec![cookie("page", "1", NOW + DAY)]);
+    }
+
+    #[test]
+    fn the_jar_keeps_at_most_the_newest_entries() {
+        let mut jar = Jar::default();
+        for index in 0..MAX_ENTRIES + 3 {
+            let at = NOW + f64::from(u32::try_from(index).unwrap());
+            jar.apply(
+                &Changes {
+                    upserts: vec![cookie(&format!("c{index}"), "1", NOW + 300.0 * DAY)],
+                    removed: vec![],
+                },
+                at,
+            );
+        }
+        jar.prune(NOW);
+        let names: Vec<_> = jar.live(NOW).iter().map(|c| c["name"].clone()).collect();
+        assert_eq!(names.len(), MAX_ENTRIES);
+        assert!(!names.contains(&json!("c0")) && !names.contains(&json!("c2")));
+        assert!(
+            names.contains(&json!("c3")) && names.contains(&json!(format!("c{}", MAX_ENTRIES + 2)))
+        );
+    }
+
+    #[test]
     fn the_jar_round_trips_through_its_file_with_deletions() {
         let mut jar = Jar::default();
         let mut partitioned = cookie("p", "1", -1.0);
@@ -506,9 +617,9 @@ mod tests {
             },
             NOW,
         );
-        let loaded = Jar::from_json(&jar.to_json()).unwrap();
+        let mut loaded = Jar::from_json(&jar.to_json()).unwrap();
         assert_eq!(loaded.entries, jar.entries);
-        assert!(!loaded.is_dirty());
+        assert_eq!(loaded.take_unsaved(NOW), None);
         assert!(loaded.live(NOW).contains(&partitioned));
         assert!(Jar::from_json("{\"version\": 9, \"entries\": []}").is_err());
         assert!(Jar::from_json("nonsense").is_err());

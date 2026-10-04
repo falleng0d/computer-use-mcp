@@ -135,6 +135,7 @@ pub fn file_url(path: &Path) -> String {
 pub struct Browser {
     child: Child,
     profile: PathBuf,
+    baseline: profile::Baseline,
     number: u8,
     devtools_port: u16,
 }
@@ -145,7 +146,7 @@ impl Browser {
         let home = workdir::home_dir();
         let profile = profile::scratch_dir(number);
         let prepared = profile.clone();
-        tokio::task::spawn_blocking(move || prepare_profile(&home, &prepared))
+        let baseline = tokio::task::spawn_blocking(move || prepare_profile(&home, &prepared))
             .await
             .context("preparing the browser profile")?
             .context("preparing the browser profile")?;
@@ -163,6 +164,7 @@ impl Browser {
         let mut browser = Self {
             child,
             profile,
+            baseline,
             number,
             devtools_port,
         };
@@ -253,8 +255,8 @@ impl Browser {
         }
         ask_to_quit(&self.child);
         let quit = tokio::time::timeout(QUIT_TIMEOUT, self.child.wait()).await;
-        let quit_cleanly = quit.is_ok();
-        if !quit_cleanly {
+        let quit_cleanly = matches!(&quit, Ok(Ok(status)) if status.success());
+        if quit.is_err() {
             warn!(
                 devtools_port = self.devtools_port,
                 "browser did not quit, killing it"
@@ -270,8 +272,11 @@ impl Browser {
             }
         }
         let (home, scratch, number) = (workdir::home_dir(), self.profile.clone(), self.number);
+        let baseline = std::mem::take(&mut self.baseline);
         let finished = tokio::task::spawn_blocking(move || {
-            if quit_cleanly && let Err(error) = profile::save_to_template(&home, &scratch, number) {
+            if quit_cleanly
+                && let Err(error) = profile::save_to_template(&home, &scratch, number, &baseline)
+            {
                 warn!(screen = number, %error, "could not save the browser profile to the template");
             }
             profile::discard(&scratch);
@@ -318,7 +323,7 @@ fn lock_holder_alive(profile: &Path) -> bool {
 /// # Errors
 ///
 /// Fails when a Chromium that is still running holds the scratch profile.
-fn prepare_profile(home: &Path, profile: &Path) -> Result<()> {
+fn prepare_profile(home: &Path, profile: &Path) -> Result<profile::Baseline> {
     if lock_holder_alive(profile) {
         bail!(
             "a Chromium from an earlier session is still running on {}, close it or wait for it to exit",
