@@ -15,9 +15,30 @@ body { display: flex; }
 #sessions li.flash button { animation: flash 3s ease-out; }
 .title { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta { display: block; color: var(--muted); font-size: 12px; }
-#stage { position: relative; flex: 1; min-width: 0; }
+#stage { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+#bar { flex: none; height: 49px; display: flex; align-items: center; gap: 10px; padding: 0 12px 0 16px; background: var(--panel); border-bottom: 1px solid var(--line); transition: background-color .15s; }
+#bar.unlocked { background: color-mix(in srgb, var(--accent) 9%, var(--panel)); }
+.icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+#bar > .icon { color: var(--muted); }
+#bar-info { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
+#bar-screen { font-weight: 600; }
+#bar-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+#bar-size { color: var(--muted); font-size: 12px; flex: none; }
+#bar-title:not(:empty)::before, #bar-size:not(:empty)::before { content: "\00b7"; margin-right: 8px; }
+#lock-state { flex: none; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); font-size: 12px; white-space: nowrap; }
+#bar.unlocked #lock-state { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+#bar button { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
+#bar button:hover { background: #232730; }
+#bar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#bar #lock:not(.unlock) { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+#bar #lock.unlock { background: var(--accent); border-color: var(--accent); color: #0d1117; font-weight: 600; }
+#bar #lock.unlock:hover { background: color-mix(in srgb, var(--accent) 88%, white); }
+#bar .icon-button { width: 30px; padding: 0; justify-content: center; color: var(--muted); }
+#bar .icon-button:hover { color: var(--text); }
+#view { position: relative; flex: 1; min-height: 0; }
 #screen { position: absolute; inset: 0; }
 #message { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 12px; align-items: center; justify-content: center; text-align: center; padding: 24px; color: var(--muted); font-size: 16px; pointer-events: none; }
-#message button { pointer-events: auto; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
-#banner { position: absolute; top: 0; left: 0; right: 0; padding: 6px 12px; background: #5a4a14; color: #ffe9a8; font-size: 12px; text-align: center; z-index: 2; }
+#banner { flex: none; padding: 6px 12px; background: #5a4a14; color: #ffe9a8; font-size: 12px; text-align: center; }
+@media (max-width: 1100px) { #bar-size { display: none; } }
+@media (max-width: 760px) { #bar-title { display: none; } }
 [hidden] { display: none !important; }

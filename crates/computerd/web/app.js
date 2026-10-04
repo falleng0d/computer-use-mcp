@@ -11,6 +11,13 @@ const screenEl = el('screen');
 const messageEl = el('message');
 const messageText = el('message-text');
 const reconnectBtn = el('reconnect');
+const barEl = el('bar');
+const barScreen = el('bar-screen');
+const barTitle = el('bar-title');
+const barSize = el('bar-size');
+const lockState = el('lock-state');
+const lockBtn = el('lock');
+const lockLabel = el('lock-label');
 const bannerEl = el('banner');
 
 let sessions = [];
@@ -52,10 +59,43 @@ function setStatus(text, bad = false) {
   statusEl.className = bad ? 'bad' : '';
 }
 
-function showMessage(text, canReconnect = false) {
+function showMessage(text) {
   messageText.textContent = text;
-  reconnectBtn.hidden = !canReconnect;
   messageEl.hidden = !text;
+}
+
+// The lock is per page. Every new connection starts locked. Clipboard code
+// asks `isUnlocked()` before it forwards anything to the screen.
+let unlocked = false;
+
+function isUnlocked() {
+  return unlocked && connected && rfb !== null;
+}
+
+function setUnlocked(value) {
+  unlocked = value && connected && rfb !== null;
+  if (rfb) {
+    rfb.viewOnly = !unlocked;
+    if (unlocked) rfb.focus();
+    else rfb.blur();
+  }
+  renderBar();
+}
+
+function renderBar() {
+  barEl.hidden = !selected || !(connected || sessionOn(selected));
+  if (barEl.hidden) return;
+  const open = isUnlocked();
+  barEl.classList.toggle('unlocked', open);
+  barScreen.textContent = `Screen ${selected}`;
+  barTitle.textContent = sessionOn(selected)?.title ?? '';
+  const canvas = connected ? screenEl.querySelector('canvas') : null;
+  barSize.textContent = canvas ? `${canvas.width}x${canvas.height}` : '';
+  lockState.textContent = open ? 'You are in control' : 'View only';
+  lockLabel.textContent = open ? 'Lock' : 'Unlock';
+  lockBtn.classList.toggle('unlock', !open);
+  lockBtn.disabled = !connected;
+  lockBtn.title = open ? 'Stop sending mouse and keyboard to the screen' : 'Send mouse and keyboard to the screen';
 }
 
 function sessionOn(screen) {
@@ -89,6 +129,7 @@ function render() {
   if (sessions.length === 0) setStatus('No sessions yet.');
   else setStatus('');
   bannerEl.hidden = !(connected && selected && !sessionOn(selected));
+  renderBar();
 }
 
 function flash(screen) {
@@ -107,6 +148,7 @@ function disconnect() {
     old.disconnect();
   }
   connected = false;
+  unlocked = false;
   screenEl.replaceChildren();
 }
 
@@ -121,6 +163,7 @@ function select(screen) {
 
 function connect() {
   disconnect();
+  renderBar();
   if (!selected) {
     showMessage(sessions.length ? 'Pick a screen on the left.' : 'No sessions yet.');
     return;
@@ -133,9 +176,11 @@ function connect() {
   const client = new RFB(screenEl, url, { credentials: { password: key } });
   client.scaleViewport = true;
   client.resizeSession = false;
+  client.viewOnly = true;
   client.addEventListener('connect', () => {
     connected = true;
     showMessage('');
+    setUnlocked(false);
     render();
   });
   client.addEventListener('securityfailure', () => {
@@ -145,16 +190,18 @@ function connect() {
     if (rfb !== client) return;
     rfb = null;
     connected = false;
+    unlocked = false;
     screenEl.replaceChildren();
     if (keyRejected) showMessage('Wrong key. Open the link from the computer logs again.');
     else if (!sessionOn(screen)) showMessage(`Screen ${screen} ended.`);
-    else showMessage(`Disconnected from screen ${screen}.`, true);
+    else showMessage(`Disconnected from screen ${screen}.`);
     render();
   });
   rfb = client;
 }
 
 reconnectBtn.addEventListener('click', connect);
+lockBtn.addEventListener('click', () => setUnlocked(!isUnlocked()));
 
 function handle(name, data) {
   if (name === 'sessions') {
