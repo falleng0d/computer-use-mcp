@@ -800,7 +800,7 @@ mod tests {
             timezone: Some("UTC".to_owned()),
             port_base: Ok(crate::computer::free_port_base()),
         };
-        let docker = Docker::connect_with_defaults().unwrap();
+        let docker = crate::docker_host::connect().unwrap();
         let _cleanup = Cleanup {
             docker: docker.clone(),
             name: name.clone(),
@@ -841,7 +841,7 @@ mod tests {
             timezone: None,
             port_base: Ok(crate::computer::free_port_base()),
         };
-        let docker = Docker::connect_with_defaults().unwrap();
+        let docker = crate::docker_host::connect().unwrap();
         let _cleanup = Cleanup {
             docker,
             name,
@@ -878,7 +878,7 @@ mod tests {
             timezone: None,
             port_base: Ok(crate::computer::free_port_base()),
         };
-        let docker = Docker::connect_with_defaults().unwrap();
+        let docker = crate::docker_host::connect().unwrap();
         let cleanup = Cleanup {
             docker,
             name,
@@ -967,7 +967,7 @@ mod tests {
             timezone: None,
             port_base: Ok(crate::computer::free_port_base()),
         };
-        let docker = Docker::connect_with_defaults().unwrap();
+        let docker = crate::docker_host::connect().unwrap();
         let _cleanup = Cleanup {
             docker,
             name,
@@ -1016,7 +1016,7 @@ mod tests {
             timezone: None,
             port_base: Ok(crate::computer::free_port_base()),
         };
-        let docker = Docker::connect_with_defaults().unwrap();
+        let docker = crate::docker_host::connect().unwrap();
         let _cleanup = Cleanup {
             docker: docker.clone(),
             name: name.clone(),
@@ -1071,7 +1071,7 @@ mod tests {
             timezone: None,
             port_base: Ok(crate::computer::free_port_base()),
         };
-        let docker = Docker::connect_with_defaults().unwrap();
+        let docker = crate::docker_host::connect().unwrap();
         let _cleanup = Cleanup {
             docker,
             name,
@@ -1337,7 +1337,7 @@ sleep 1";
             timezone: None,
             port_base: Ok(crate::computer::free_port_base()),
         };
-        let docker = Docker::connect_with_defaults().unwrap();
+        let docker = crate::docker_host::connect().unwrap();
         let _cleanup = Cleanup {
             docker,
             name,
@@ -1433,7 +1433,7 @@ none
             timezone: None,
             port_base: Ok(crate::computer::free_port_base()),
         };
-        let docker = Docker::connect_with_defaults().unwrap();
+        let docker = crate::docker_host::connect().unwrap();
         let _cleanup = Cleanup {
             docker,
             name,
@@ -1673,7 +1673,7 @@ X-Viewer-Key: {key}
             timezone: None,
             port_base: Ok(port_base),
         };
-        let docker = Docker::connect_with_defaults().unwrap();
+        let docker = crate::docker_host::connect().unwrap();
         let _cleanup = Cleanup {
             docker,
             name,
@@ -1810,7 +1810,7 @@ USER computer
             timezone: None,
             port_base: Ok(crate::computer::free_port_base()),
         };
-        let docker = Docker::connect_with_defaults().unwrap();
+        let docker = crate::docker_host::connect().unwrap();
         let _cleanup = Cleanup {
             docker: docker.clone(),
             name: name.clone(),

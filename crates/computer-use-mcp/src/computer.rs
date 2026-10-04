@@ -392,8 +392,7 @@ pub struct Docked {
 
 impl Docked {
     pub fn connect(settings: Settings, image: Image) -> Result<Self> {
-        let docker = Docker::connect_with_defaults()
-            .context("connecting to Docker, is Docker running (see DOCKER_HOST)?")?;
+        let docker = crate::docker_host::connect()?;
         Ok(Self {
             docker,
             settings,

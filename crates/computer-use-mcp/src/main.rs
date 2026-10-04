@@ -1,5 +1,6 @@
 mod client;
 mod computer;
+mod docker_host;
 mod file_result;
 mod image;
 mod observation;
@@ -33,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
             println!("protocol: {}", computer_protocol::PROTOCOL_VERSION);
             println!("image: {}", image.reference);
             println!("pull if missing: {}", image.pull);
+            println!("{}", docker_line());
             for line in computer_lines(&image).await {
                 println!("{line}");
             }
@@ -44,6 +46,14 @@ async fn main() -> anyhow::Result<()> {
 }
 
 const INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The Docker endpoint in use and why, or why none can be chosen.
+fn docker_line() -> String {
+    match docker_host::from_env() {
+        Ok(resolved) => format!("docker: {resolved}"),
+        Err(error) => format!("docker: unavailable ({error:#})"),
+    }
+}
 
 /// What `info` says about the computer container, one `key: value` line each.
 async fn computer_lines(image: &image::Image) -> Vec<String> {

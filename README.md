@@ -61,6 +61,19 @@ The server makes no Docker calls until an agent calls `start_computer`. That too
 
 Sessions end on their own, so a crashed or forgotten agent does not hold a screen. Each MCP server process sends a heartbeat every 10 s for all its sessions, and its sessions end 30 s after the last one, which covers a killed process. A session also ends after its idle time with no agent call. A running `shell` command counts as activity, so a long command never makes its own session idle. When the MCP server exits on stdin close, Ctrl+C, or SIGTERM, it ends its sessions at once, waiting at most 3 s. Ending a session closes its screen and frees its number. Files in home are never touched. A call on a session that ended on its own says why and asks the agent to call `start_computer` again.
 
+## Docker endpoint
+
+The server talks to the same Docker as your `docker` command. It picks the endpoint in this order.
+
+1. `DOCKER_HOST`.
+2. The context named by `DOCKER_CONTEXT`.
+3. `currentContext` in `~/.docker/config.json` (the folder moves with `DOCKER_CONFIG`).
+4. The platform default, a named pipe on Windows and `/var/run/docker.sock` elsewhere.
+
+The context `default` means step 4. Colima, OrbStack, and Rancher Desktop work after `docker context use <name>` (for example `colima`, `orbstack`, or `rancher-desktop`). Run `computer-use-mcp info` to see the endpoint in use and why it was chosen.
+
+Supported endpoints are `unix://`, `npipe://`, `tcp://`, and `http://`. A context that needs TLS or uses `ssh://` is refused with a message that names it. Use a context with a socket, or set `DOCKER_HOST`.
+
 ## Watching and using the screens
 
 `start_computer` returns a viewer link such as `http://127.0.0.1:20900/#key=ab3d5fgh`, and `computer-use-mcp info` prints it while the computer runs. The container logs print it at every start (`docker logs <name>`). Open it in a browser. The page lists every live session in a sidebar with its title, screen number, start time, and number of viewers, and updates as sessions start and end. Click a screen to connect to it. You have full control of the screen, and nothing coordinates you with the agent. The browser keeps the key in local storage and removes it from the address bar. The address bar keeps `#screen=<n>` so a link can open the page on one screen.
