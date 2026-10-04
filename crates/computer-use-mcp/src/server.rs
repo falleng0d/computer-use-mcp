@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::{
     client::{Client, UnknownSession},
     computer::{Docked, Endpoint, Settings},
-    file_result,
+    devtools, file_result,
     image::{self, Image},
     observation,
     open::{self, Opener},
@@ -250,6 +250,7 @@ pub(crate) struct Server {
     screen_size: Result<ScreenSize, String>,
     shell_timeouts: Result<ShellTimeouts, String>,
     idle: Result<NonZeroU32, String>,
+    devtools_idle: Result<NonZeroU32, String>,
     open_mode: Result<open::Mode, String>,
     opener: Arc<Opener>,
     heartbeats: Arc<Heartbeats>,
@@ -285,6 +286,7 @@ impl Server {
             settings::screen_size(),
             settings::shell_timeouts(),
             settings::idle(),
+            settings::devtools_idle(),
             settings::open_mode(),
         )
     }
@@ -295,6 +297,7 @@ impl Server {
         screen_size: Result<ScreenSize, String>,
         shell_timeouts: Result<ShellTimeouts, String>,
         idle: Result<NonZeroU32, String>,
+        devtools_idle: Result<NonZeroU32, String>,
         open_mode: Result<open::Mode, String>,
     ) -> Self {
         let opener = Arc::new(Opener::new(open_mode.clone().unwrap_or_default()));
@@ -303,6 +306,7 @@ impl Server {
             screen_size,
             shell_timeouts,
             idle,
+            devtools_idle,
             open_mode,
             opener,
             heartbeats: Arc::new(Heartbeats::new()),
@@ -530,8 +534,81 @@ impl Server {
         }
     }
 
+    /// Runs one of the fixed developer tools commands in the session's shell.
+    async fn run_devtools_command(
+        &self,
+        session: &SessionId,
+        client: &Client,
+        command: String,
+        timeout_secs: u64,
+    ) -> anyhow::Result<computer_protocol::ShellReply> {
+        let request = ShellRequest {
+            command,
+            timeout_secs: Some(timeout_secs),
+        };
+        client
+            .shell(session, &request, self.shell_timeouts()?)
+            .await
+    }
+
+    async fn start_devtools(&self, session: &str) -> anyhow::Result<String> {
+        let idle = self
+            .devtools_idle
+            .clone()
+            .map_err(|message| anyhow::anyhow!(message))?;
+        let (session, endpoint) = self.endpoint_for(session).await?;
+        let client = Client::new(&endpoint)?;
+        match client
+            .launch_app(&session, "browser".to_owned(), None)
+            .await
+        {
+            Err(error) if error.is::<UnknownSession>() => return Err(gone(error)),
+            Err(error) => return Err(error.context("starting the screen's Chromium")),
+            Ok(observation) => self.announce(&endpoint, observation.opened_screen),
+        }
+        let reply = self
+            .run_devtools_command(
+                &session,
+                &client,
+                devtools::start_command(idle),
+                devtools::COMMAND_TIMEOUT_SECS,
+            )
+            .await;
+        match reply {
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
+            other => devtools::started(&other?),
+        }
+    }
+
+    async fn stop_devtools(&self, session: &str) -> anyhow::Result<String> {
+        let (session, client) = self.client_for(session).await?;
+        let reply = self
+            .run_devtools_command(
+                &session,
+                &client,
+                devtools::STOP_COMMAND.to_owned(),
+                devtools::COMMAND_TIMEOUT_SECS,
+            )
+            .await;
+        match reply {
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
+            other => devtools::stopped(&other?),
+        }
+    }
+
     async fn end(&self, session: &str) -> anyhow::Result<()> {
         let (session, client) = self.client_for(session).await?;
+        if let Err(error) = self
+            .run_devtools_command(
+                &session,
+                &client,
+                devtools::STOP_COMMAND.to_owned(),
+                devtools::CLEANUP_TIMEOUT_SECS,
+            )
+            .await
+        {
+            warn!(error = %error, "could not stop Chrome DevTools before ending the session");
+        }
         match client.end_session(&session).await {
             Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
             other => other,
@@ -634,6 +711,28 @@ impl Server {
     }
 
     #[tool(
+        description = "Start Chrome DevTools for your screen's Chromium, so you can inspect and drive its pages with DOM snapshots, console and network logs, script evaluation, and screenshots. Starts the screen's Chromium if needed. Returns how to call the DevTools tools with the shell tool. It uses a few hundred MB while running and stops by itself when unused, call stop_chrome_devtools when you are done."
+    )]
+    async fn start_chrome_devtools(
+        &self,
+        Parameters(args): Parameters<EndSessionArgs>,
+    ) -> Result<String, String> {
+        let result = self.start_devtools(&args.session).await;
+        report("start_chrome_devtools", result)
+    }
+
+    #[tool(
+        description = "Stop Chrome DevTools for your screen and free its memory. The page stays open in Chromium. Replies that it stopped or was not running."
+    )]
+    async fn stop_chrome_devtools(
+        &self,
+        Parameters(args): Parameters<EndSessionArgs>,
+    ) -> Result<String, String> {
+        let result = self.stop_devtools(&args.session).await;
+        report("stop_chrome_devtools", result)
+    }
+
+    #[tool(
         description = "Set the working folder of your session. Your shell commands start there, and relative paths in file tools resolve from it. A relative path starts at the current working folder, `~` is home, and the folder must exist. Starts at home. Returns the new absolute path."
     )]
     async fn set_cwd(&self, Parameters(args): Parameters<SetCwdArgs>) -> Result<String, String> {
@@ -715,7 +814,7 @@ mod tests {
         Cleanup, Tags, docker_cli, rfb_authenticate, rfb_connect, rfb_size, viewers_on_page,
     };
     use super::*;
-    use crate::settings::parse_idle;
+    use crate::settings::{parse_devtools_idle, parse_idle};
 
     #[tokio::test]
     #[ignore = "needs Docker"]
@@ -738,6 +837,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
 
@@ -779,6 +879,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
 
@@ -816,6 +917,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
         (server, cleanup)
@@ -905,6 +1007,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
 
@@ -954,6 +1057,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
         let two = Server::new(
@@ -962,6 +1066,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
 
@@ -1009,6 +1114,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
         let session = server.start("actor").await.unwrap().session;
@@ -1276,6 +1382,7 @@ sleep 1";
             Ok(ScreenSize::default()),
             Ok(timeouts),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
         let session = server.start("shell user").await.unwrap().session;
@@ -1371,6 +1478,7 @@ none
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
         let writer = server.start("writer").await.unwrap().session;
@@ -1471,6 +1579,7 @@ none
             Ok(size),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
 
@@ -1586,6 +1695,7 @@ USER computer
                 Ok(ScreenSize::default()),
                 Ok(ShellTimeouts::default()),
                 parse_idle(None),
+                parse_devtools_idle(None),
                 Ok(open::Mode::None),
             )
         };
@@ -1682,6 +1792,7 @@ USER computer
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
         let session = server.start("file transfer").await.unwrap().session;

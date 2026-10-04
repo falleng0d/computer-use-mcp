@@ -1,5 +1,6 @@
 mod client;
 mod computer;
+mod devtools;
 mod docker_host;
 mod file_result;
 mod image;

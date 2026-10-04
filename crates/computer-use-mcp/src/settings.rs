@@ -21,6 +21,8 @@ const SCREEN_SIZE_ENV: &str = "COMPUTER_USE_SCREEN_SIZE";
 const SHELL_TIMEOUT_ENV: &str = "COMPUTER_USE_SHELL_TIMEOUT";
 const SHELL_TIMEOUT_MAX_ENV: &str = "COMPUTER_USE_SHELL_TIMEOUT_MAX";
 const IDLE_TIMEOUT_ENV: &str = "COMPUTER_USE_IDLE_TIMEOUT";
+const DEVTOOLS_IDLE_ENV: &str = "COMPUTER_USE_DEVTOOLS_IDLE";
+const DEFAULT_DEVTOOLS_IDLE_SECS: u32 = 600;
 const TIME_FORMS: &str = "such as 90, 30s, 30m, or 2h";
 
 fn var(name: &str) -> Option<String> {
@@ -113,18 +115,31 @@ fn secs_setting(name: &str, value: Option<&str>) -> Result<Option<u32>, String> 
     })
 }
 
+/// Reads a time above zero from `name`. Unset or empty gives `default_secs`.
+fn nonzero_secs(name: &str, default_secs: u32, value: Option<&str>) -> Result<NonZeroU32, String> {
+    match secs_setting(name, value)? {
+        None => Ok(NonZeroU32::new(default_secs).expect("the default time is not zero")),
+        Some(secs) => NonZeroU32::new(secs)
+            .ok_or_else(|| format!("{name}=0: expected a time above zero {TIME_FORMS}")),
+    }
+}
+
 /// Reads the idle time. Unset or empty gives the default.
 pub(crate) fn parse_idle(value: Option<&str>) -> Result<NonZeroU32, String> {
-    match secs_setting(IDLE_TIMEOUT_ENV, value)? {
-        None => Ok(NonZeroU32::new(DEFAULT_IDLE_SECS).expect("the default idle time is not zero")),
-        Some(secs) => NonZeroU32::new(secs).ok_or_else(|| {
-            format!("{IDLE_TIMEOUT_ENV}=0: expected a time above zero {TIME_FORMS}")
-        }),
-    }
+    nonzero_secs(IDLE_TIMEOUT_ENV, DEFAULT_IDLE_SECS, value)
 }
 
 pub(crate) fn idle() -> Result<NonZeroU32, String> {
     parse_idle(var(IDLE_TIMEOUT_ENV).as_deref())
+}
+
+/// Reads the time after which an unused developer tools session stops. Unset or empty gives 10 minutes.
+pub(crate) fn parse_devtools_idle(value: Option<&str>) -> Result<NonZeroU32, String> {
+    nonzero_secs(DEVTOOLS_IDLE_ENV, DEFAULT_DEVTOOLS_IDLE_SECS, value)
+}
+
+pub(crate) fn devtools_idle() -> Result<NonZeroU32, String> {
+    parse_devtools_idle(var(DEVTOOLS_IDLE_ENV).as_deref())
 }
 
 /// Builds the shell timeouts from the two settings. A default left unset follows a lower maximum.
@@ -180,6 +195,19 @@ mod tests {
         for bad in ["0", "0m", "m", "-5", "1d", "1.5h", "4294967295h"] {
             let message = secs(Some(bad)).unwrap_err();
             assert!(message.contains(IDLE_TIMEOUT_ENV), "{bad}: {message}");
+        }
+    }
+
+    #[test]
+    fn devtools_idle_defaults_to_ten_minutes_and_refuses_zero_and_junk() {
+        let secs = |text| parse_devtools_idle(text).map(NonZeroU32::get);
+        assert_eq!(secs(None), Ok(600));
+        assert_eq!(secs(Some("")), Ok(600));
+        assert_eq!(secs(Some("45s")), Ok(45));
+        assert_eq!(secs(Some("1h")), Ok(3600));
+        for bad in ["0", "soon"] {
+            let message = secs(Some(bad)).unwrap_err();
+            assert!(message.starts_with(DEVTOOLS_IDLE_ENV), "{bad}: {message}");
         }
     }
 
