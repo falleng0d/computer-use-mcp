@@ -2,7 +2,7 @@
 
 An MCP server that gives AI agents a computer. Any MCP client, such as Claude Code or OpenCode, can see and control one shared Linux desktop that runs in Docker. You can watch and use the same desktop in a browser or with any VNC client.
 
-> **Status:** early. The MCP server starts the computer and hands out sessions (`start_computer`, `end_session`), shows each session its own screen (`computer_observe`), and lets it click, type, and scroll (`computer_act`), runs shell commands (`shell`, `set_cwd`), and lists, reads, and writes files (`list_files`, `read_file`, `write_file`).
+> **Status:** early. The MCP server starts the computer and hands out sessions (`start_computer`, `end_session`), shows each session its own screen (`computer_observe`), and lets it click, type, and scroll (`computer_act`), runs shell commands (`shell`, `set_cwd`), lists, reads, and writes files (`list_files`, `read_file`, `write_file`), and opens pages, files, and applications on the screen (`open_path`, `launch_app`).
 
 ## Design
 
@@ -19,7 +19,7 @@ The project has three Rust crates:
 | Crate | Runs on | Purpose |
 | --- | --- | --- |
 | `computer-use-mcp` | Your machine (Windows or macOS) | MCP server over stdio. Manages the container and opens the VNC view. |
-| `computerd` | Inside the container | Captures the screen and drives mouse and keyboard input. |
+| `computerd` | Inside the container | Runs the sessions and their screens, captures the screen, drives mouse and keyboard input, serves the viewer, runs Chromium with cookie sync, and handles shell commands and files. |
 | `computer-protocol` | Both | Request and response types shared by the two binaries. |
 
 ## Install
@@ -43,7 +43,7 @@ Add it to your agent host as an MCP server that runs `computer-use-mcp` with no 
 | `COMPUTER_USE_PORT_BASE` | `20900` | First of the 17 host ports the computer publishes on `127.0.0.1` (a port from 1024 to 65519). Applies at creation. |
 | `COMPUTER_USE_OPEN` | `browser` | What opens when one of this server's sessions gets its screen: `browser`, `vnc`, or `none`. Read when `start_computer` runs. See "Opening the viewer". |
 | `COMPUTER_USE_VNC_VIEWER` | unset | Windows only. Path of the VNC viewer that `vnc` mode runs. See "Opening the viewer". |
-| `COMPUTER_USE_IMAGE` | Release builds use `ghcr.io/falleng0d/computer-use-mcp:<version>`. Dev builds use `computer-use-mcp:dev`. | Image used for the computer container. |
+| `COMPUTER_USE_IMAGE` | `ghcr.io/falleng0d/computer-use-mcp:<version>` in release builds, `computer-use-mcp:dev` in dev builds | Image used for the computer container. |
 
 Release builds pull their image when it is missing. Dev builds never pull, so a dev host binary is never paired with an old image by accident. Build the dev image with `just image`.
 
@@ -51,7 +51,7 @@ The server makes no Docker calls until an agent calls `start_computer`. That too
 
 `computer_observe` takes the session id and returns a PNG of that session's own screen plus the frame id, capture time, size, cursor position, and active window title. The first call opens the screen, which is one `Xvnc` and Fluxbox inside the computer. The computer has 16 screens. A session that never calls it gets none, and ending the session closes its screen. When nothing changed since the session's previous screenshot, the image is left out and the text says so.
 
-`computer_act` takes the session id and up to 24 ordered actions: `click`, `move`, `down`, `up`, `type`, `key`, `scroll`, `wait`, and `focus`. Positions are pixels on the session's screen. A double click counts as two actions. Waits and the settle time are capped at 5 s, and a scroll takes 1 to 20 steps. `type` handles any Unicode text. `key` takes names such as `enter`, `esc`, and `f5` with the modifiers `ctrl`, `alt`, `shift`, and `super` (also `cmd`, `option`, `meta`, `win`). `focus` raises an open window by its class or title. Launching apps comes later. The batch ends with a screenshot by default, taken `settle_ms` (default 300) after the last action, and the unchanged-frame rule applies to it. Set `observe` to false to skip it. The 4th identical batch of scroll, pointer, or key actions in a row that leaves the screen unchanged is refused.
+`computer_act` takes the session id and up to 24 ordered actions: `click`, `move`, `down`, `up`, `type`, `key`, `scroll`, `wait`, and `focus`. Positions are pixels on the session's screen. A double click counts as two actions. Waits and the settle time are capped at 5 s, and a scroll takes 1 to 20 steps. `type` handles any Unicode text. `key` takes names such as `enter`, `esc`, and `f5` with the modifiers `ctrl`, `alt`, `shift`, and `super` (also `cmd`, `option`, `meta`, `win`). `focus` raises a window by its class or title, or starts the app when no window matches. The batch ends with a screenshot by default, taken `settle_ms` (default 300) after the last action, and the unchanged-frame rule applies to it. Set `observe` to false to skip it. The 4th identical batch of scroll, pointer, or key actions in a row that leaves the screen unchanged is refused.
 
 `shell` takes the session id, a command, and an optional `timeout` in seconds. It runs `bash -lc` as the user `computer` inside the computer, in the session's working folder (home until `set_cwd` changes it), with no input. `DISPLAY` points at the session's screen when it has one. The result gives the exit code, the duration, and stdout and stderr separately. A failing command is a normal result. A command that runs past its timeout is killed with everything it started, and the result says so and keeps the output printed until then. Each stream keeps its first and last 15000 bytes with a `[... N bytes omitted ...]` marker between them. The call returns when the command exits, so start long-running jobs in the background with their output redirected, for example `setsid nohup server >log 2>&1 &`. Shell calls never wait for desktop actions, and one session may run several at once.
 
@@ -86,6 +86,9 @@ Ports published on `127.0.0.1` only:
 | --- | --- |
 | base | Viewer page and its WebSocket bridge for noVNC (v1.7.0) |
 | base + 1 to base + 16 | Raw VNC for screens 1 to 16 |
+| random port | The `computerd` API that the MCP server calls. Container port 7070, protected by a bearer token. |
+
+The API port is picked by Docker when the container is created. Port 7071 (the launcher for the Fluxbox menu), 9221 + N (DevTools), and 5900 + N (Xvnc, behind the viewer) exist inside the container only.
 
 Every viewer goes through `computerd`, which checks the key, refuses page requests whose `Host` is not `127.0.0.1` or `localhost` on that port, and checks `Origin` on WebSocket upgrades. While a viewer is attached to a screen, the session's idle timer does not run. When a session ends while someone watches, it ends for the agent at once, but its screen stays open until the last viewer disconnects.
 
