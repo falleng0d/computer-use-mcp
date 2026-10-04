@@ -15,7 +15,6 @@ use std::{
 use serde_json::Value;
 
 const TEMPLATE_DIR: &str = ".local/share/computer-use/chromium/template";
-const LEGACY_DIR: &str = ".local/share/computer-use/chromium";
 const SCRATCH_DIR: &str = "/tmp/computer-use/chromium";
 const DISCARD_TRIES: u32 = 10;
 const DISCARD_WAIT: Duration = Duration::from_millis(300);
@@ -55,11 +54,6 @@ pub fn template_dir(home: &Path) -> PathBuf {
 /// Folder the Chromium of screen `number` runs its profile in. It starts fresh every time.
 pub fn scratch_dir(number: u8) -> PathBuf {
     Path::new(SCRATCH_DIR).join(format!("screen-{number}"))
-}
-
-/// Profile folder of screen `number` from before profiles were cloned from a template.
-fn legacy_dir(home: &Path, number: u8) -> PathBuf {
-    home.join(LEGACY_DIR).join(format!("screen-{number}"))
 }
 
 /// Removes the keys of `Preferences` that name installed extensions.
@@ -146,22 +140,15 @@ fn copy_group(from: &Path, to: &Path, group: &[&str], tag: &str) -> io::Result<(
     Ok(())
 }
 
-/// Starts the template from the profile of screen 1 that earlier versions kept in home.
-/// The template appears whole, or another start that got there first keeps it.
-fn seed_template(home: &Path) -> io::Result<()> {
+/// Creates an empty template when home has none. The template appears whole, or another start
+/// that got there first keeps its own.
+fn ensure_template(home: &Path) -> io::Result<()> {
     let template = template_dir(home);
-    let legacy = legacy_dir(home, 1);
-    if template.exists() || !legacy.is_dir() {
+    if template.exists() {
         return Ok(());
     }
-    let staging = template.with_file_name(unique("template.seed"));
-    let copied = GROUPS
-        .iter()
-        .try_for_each(|group| copy_group(&legacy, &staging, group, "seed"));
-    if let Err(error) = copied {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(error);
-    }
+    let staging = template.with_file_name(unique("template.new"));
+    std::fs::create_dir_all(&staging)?;
     if std::fs::rename(&staging, &template).is_err() {
         let _ = std::fs::remove_dir_all(&staging);
     }
@@ -170,7 +157,7 @@ fn seed_template(home: &Path) -> io::Result<()> {
 
 /// Fills a scratch profile with the template's shared files.
 pub fn clone_template(home: &Path, scratch: &Path) -> io::Result<Baseline> {
-    seed_template(home)?;
+    ensure_template(home)?;
     let template = template_dir(home);
     let mut baseline = Baseline::new();
     for (index, group) in GROUPS.iter().enumerate() {
@@ -353,42 +340,15 @@ mod tests {
     }
 
     #[test]
-    fn the_template_is_seeded_once_from_the_old_screen_1_profile() {
-        let (home, scratch) = (temp("home-seed"), temp("scratch-seed"));
-        let legacy = ".local/share/computer-use/chromium/screen-1/Default";
-        write(&home, &format!("{legacy}/Bookmarks"), "from screen 1");
-        write(&home, &format!("{legacy}/Cookies"), "secret");
-        let other = ".local/share/computer-use/chromium/screen-2/Default";
-        write(&home, &format!("{other}/Bookmarks"), "from screen 2");
-        clone_template(&home, &scratch).unwrap();
-        assert_eq!(
-            read(&scratch, "Default/Bookmarks").as_deref(),
-            Some("from screen 1")
-        );
-        assert_eq!(read(&template_dir(&home), "Default/Cookies"), None);
-        let siblings: Vec<_> = std::fs::read_dir(template_dir(&home).parent().unwrap())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with("template"))
-            .collect();
-        assert_eq!(siblings, vec!["template".to_owned()]);
-        write(&home, &format!("{legacy}/Bookmarks"), "changed later");
-        let again = temp("scratch-seed-2");
-        clone_template(&home, &again).unwrap();
-        assert_eq!(
-            read(&again, "Default/Bookmarks").as_deref(),
-            Some("from screen 1")
-        );
-        for dir in [&home, &scratch, &again] {
-            std::fs::remove_dir_all(dir).unwrap();
-        }
-    }
-
-    #[test]
-    fn a_first_start_with_nothing_saved_gives_an_empty_profile() {
+    fn a_first_start_with_nothing_saved_creates_an_empty_template_and_profile() {
         let (home, scratch) = (temp("home-empty"), temp("scratch-empty"));
         clone_template(&home, &scratch).unwrap();
         assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+        let siblings: Vec<_> = std::fs::read_dir(template_dir(&home).parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(siblings, vec!["template".to_owned()]);
         std::fs::remove_dir_all(&home).unwrap();
         std::fs::remove_dir_all(&scratch).unwrap();
     }
