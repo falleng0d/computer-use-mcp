@@ -68,6 +68,7 @@ ARG COMPUTER_USE_MCP_VERSION=""
 LABEL org.opencontainers.image.version="${COMPUTER_USE_MCP_VERSION}"
 COPY crates/computerd/image/fluxbox-init /etc/computerd/fluxbox-init
 COPY crates/computerd/image/fluxbox-menu /etc/computerd/fluxbox-menu
+COPY crates/computerd/image/fluxbox-apps /etc/computerd/fluxbox-apps
 COPY crates/computerd/image/chromium-policy.json /etc/chromium/policies/managed/computer-use.json
 COPY crates/computerd/image/computer-browser.desktop /usr/share/applications/computer-browser.desktop
 COPY crates/computerd/image/mimeapps.list /etc/xdg/mimeapps.list
