@@ -178,12 +178,14 @@ function connect() {
   client.resizeSession = false;
   client.viewOnly = true;
   client.addEventListener('connect', () => {
+    if (rfb !== client) return;
     connected = true;
     showMessage('');
     setUnlocked(false);
     render();
   });
   client.addEventListener('securityfailure', () => {
+    if (rfb !== client) return;
     showMessage('The VNC password was refused. Open the link from the computer logs again.', false);
   });
   client.addEventListener('disconnect', () => {
