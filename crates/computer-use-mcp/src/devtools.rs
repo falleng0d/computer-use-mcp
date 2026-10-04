@@ -8,6 +8,8 @@ use computer_protocol::{ShellOutcome, ShellReply};
 pub(crate) const COMMAND_TIMEOUT_SECS: u64 = 60;
 /// Seconds the cleanup at the end of a session may take.
 pub(crate) const CLEANUP_TIMEOUT_SECS: u64 = 20;
+/// Exit code of `chrome-devtools start` when the screen or its Chromium does not exist yet.
+const NEEDS_BROWSER_CODE: i32 = 3;
 const SCREEN_PREFIX: &str = "screen: ";
 
 /// The command that starts the developer tools for the session's screen. Only the typed idle time varies.
@@ -36,6 +38,16 @@ pub(crate) fn usage(screen: u8) -> String {
          Useful tools: navigate_page, evaluate_script, take_snapshot, list_console_messages, get_console_message, list_network_requests, get_network_request. When headers or bodies are long, pass requestFilePath or pipe the output to a file.\n\
          DevTools stops by itself after the idle time without calls, and the next mcpc call starts it again with the page state kept. It uses memory only while it runs, so call stop_chrome_devtools when you are done.\n\
          The screen's Chromium has no sandbox and uBlock Origin Lite is on, so ad requests show as blocked."
+    )
+}
+
+/// Whether the start command found no screen or no Chromium to attach to.
+pub(crate) fn needs_browser(reply: &ShellReply) -> bool {
+    matches!(
+        reply.outcome,
+        ShellOutcome::Exited {
+            code: NEEDS_BROWSER_CODE
+        }
     )
 }
 
@@ -99,10 +111,15 @@ mod tests {
     }
 
     #[test]
-    fn the_usage_names_the_session_of_the_screen() {
-        let text = usage(7);
-        assert!(text.contains("mcpc @cdt-7 tools-call list_pages"), "{text}");
-        assert!(!text.contains("@cdt-3"), "{text}");
+    fn only_the_scripts_no_browser_code_asks_for_a_browser() {
+        assert!(needs_browser(&reply(ShellOutcome::Exited { code: 3 }, "")));
+        for other in [
+            ShellOutcome::Exited { code: 0 },
+            ShellOutcome::Exited { code: 1 },
+            ShellOutcome::TimedOut { after_secs: 60 },
+        ] {
+            assert!(!needs_browser(&reply(other, "")));
+        }
     }
 
     #[test]

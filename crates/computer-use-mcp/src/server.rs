@@ -558,22 +558,26 @@ impl Server {
             .map_err(|message| anyhow::anyhow!(message))?;
         let (session, endpoint) = self.endpoint_for(session).await?;
         let client = Client::new(&endpoint)?;
-        match client
-            .launch_app(&session, "browser".to_owned(), None)
-            .await
-        {
-            Err(error) if error.is::<UnknownSession>() => return Err(gone(error)),
-            Err(error) => return Err(error.context("starting the screen's Chromium")),
-            Ok(observation) => self.announce(&endpoint, observation.opened_screen),
-        }
-        let reply = self
-            .run_devtools_command(
+        let start = || {
+            self.run_devtools_command(
                 &session,
                 &client,
                 devtools::start_command(idle),
                 devtools::COMMAND_TIMEOUT_SECS,
             )
-            .await;
+        };
+        let mut reply = start().await;
+        if reply.as_ref().is_ok_and(devtools::needs_browser) {
+            match client
+                .launch_app(&session, "browser".to_owned(), None)
+                .await
+            {
+                Err(error) if error.is::<UnknownSession>() => return Err(gone(error)),
+                Err(error) => return Err(error.context("starting the screen's Chromium")),
+                Ok(observation) => self.announce(&endpoint, observation.opened_screen),
+            }
+            reply = start().await;
+        }
         match reply {
             Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
             other => devtools::started(&other?),

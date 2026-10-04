@@ -1,74 +1,125 @@
 #!/usr/bin/env node
 // Runs chrome-devtools-mcp for one mcpc session and ends it, together with the mcpc bridge
-// that started this wrapper, after CDT_IDLE_SECS without requests or when the screen's
-// Chromium stops answering on CDT_PORT. The next mcpc call starts both again.
+// that started this wrapper, after CDT_IDLE_SECS without requests and with none in flight,
+// or when the screen's Chromium stops answering on CDT_PORT. The next mcpc call starts both again.
 'use strict';
 const { spawn } = require('node:child_process');
+const { StringDecoder } = require('node:string_decoder');
 const fs = require('node:fs');
 
-const port = process.env.CDT_PORT;
-const idleMs = (Number(process.env.CDT_IDLE_SECS) || 600) * 1000;
-const checkMs = Number(process.env.CDT_CHECK_MS) || 5000;
-const bridge = process.ppid;
+// Reads the JSON lines that pass through. Only requests other than `ping` are activity, and
+// a request stays in flight until its response comes back from the server.
+class Tracker {
+  constructor(now = Date.now()) {
+    this.last = now;
+    this.inflight = new Set();
+    this.up = { decoder: new StringDecoder('utf8'), pending: '' };
+    this.down = { decoder: new StringDecoder('utf8'), pending: '' };
+  }
 
-const child = spawn('chrome-devtools-mcp', process.argv.slice(2), {
-  stdio: ['pipe', 'pipe', 'inherit'],
-});
-let lastRequest = Date.now();
-let ending = false;
+  static lines(side, chunk) {
+    side.pending += side.decoder.write(chunk);
+    const lines = side.pending.split('\n');
+    side.pending = lines.pop();
+    const messages = [];
+    for (const line of lines) {
+      try {
+        const message = JSON.parse(line);
+        if (message && typeof message === 'object') messages.push(message);
+      } catch {
+        // not JSON, nothing to track
+      }
+    }
+    return messages;
+  }
 
-function isRequest(line) {
-  try {
-    const message = JSON.parse(line);
-    return typeof message.method === 'string' && message.method !== 'ping';
-  } catch {
-    return false;
+  request(chunk, now = Date.now()) {
+    for (const message of Tracker.lines(this.up, chunk)) {
+      if (message.id === undefined || message.id === null) continue;
+      if (typeof message.method !== 'string' || message.method === 'ping') continue;
+      this.inflight.add(JSON.stringify(message.id));
+      this.last = now;
+    }
+  }
+
+  response(chunk, now = Date.now()) {
+    for (const message of Tracker.lines(this.down, chunk)) {
+      if (message.id === undefined || message.id === null || message.method !== undefined) continue;
+      if (this.inflight.delete(JSON.stringify(message.id))) this.last = now;
+    }
+  }
+
+  idle(idleMs, now = Date.now()) {
+    return this.inflight.size === 0 && now - this.last > idleMs;
   }
 }
 
-function bridgeIsMcpc() {
-  if (bridge <= 1 || process.ppid !== bridge) return false;
-  try {
-    return fs.readFileSync(`/proc/${bridge}/cmdline`, 'utf8').includes('mcpc');
-  } catch {
-    return false;
-  }
+function main() {
+  const port = process.env.CDT_PORT;
+  const idleMs = (Number(process.env.CDT_IDLE_SECS) || 600) * 1000;
+  const checkMs = Number(process.env.CDT_CHECK_MS) || 5000;
+  const bridge = process.ppid;
+  const tracker = new Tracker();
+
+  const child = spawn('chrome-devtools-mcp', process.argv.slice(2), {
+    stdio: ['pipe', 'pipe', 'inherit'],
+  });
+  let ending = false;
+
+  const bridgeIsMcpc = () => {
+    if (bridge <= 1 || process.ppid !== bridge) return false;
+    try {
+      return fs.readFileSync(`/proc/${bridge}/cmdline`, 'utf8').includes('mcpc');
+    } catch {
+      return false;
+    }
+  };
+
+  const finish = (code) => {
+    if (ending) return;
+    ending = true;
+    child.kill('SIGKILL');
+    if (bridgeIsMcpc()) {
+      try {
+        process.kill(bridge, 'SIGTERM');
+      } catch {
+        // the bridge is already gone
+      }
+    }
+    process.exit(code);
+  };
+
+  process.stdin.on('data', (chunk) => {
+    tracker.request(chunk);
+    child.stdin.write(chunk);
+  });
+  process.stdin.on('end', () => finish(0));
+  child.stdin.on('error', () => {});
+  child.stdout.on('data', (chunk) => {
+    tracker.response(chunk);
+    process.stdout.write(chunk);
+  });
+  process.stdout.on('error', () => finish(0));
+  child.on('error', () => finish(1));
+  child.on('close', (code) => finish(code ?? 1));
+
+  setInterval(() => {
+    if (tracker.idle(idleMs)) finish(0);
+  }, 1000).unref();
+
+  let misses = 0;
+  setInterval(async () => {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (!response.ok) throw new Error(String(response.status));
+      misses = 0;
+    } catch {
+      if (++misses >= 2) finish(0);
+    }
+  }, checkMs).unref();
 }
 
-function finish(code) {
-  if (ending) return;
-  ending = true;
-  child.kill('SIGKILL');
-  if (bridgeIsMcpc()) process.kill(bridge, 'SIGTERM');
-  process.exit(code);
-}
-
-let pending = '';
-process.stdin.on('data', (chunk) => {
-  pending += chunk;
-  const lines = pending.split('\n');
-  pending = lines.pop();
-  if (lines.some(isRequest)) lastRequest = Date.now();
-  child.stdin.write(chunk);
-});
-process.stdin.on('end', () => finish(0));
-child.stdin.on('error', () => {});
-child.stdout.pipe(process.stdout);
-child.on('exit', (code) => finish(code ?? 1));
-
-setInterval(() => {
-  if (Date.now() - lastRequest > idleMs) finish(0);
-}, 1000).unref();
-
-let misses = 0;
-setInterval(async () => {
-  try {
-    const response = await fetch(`http://127.0.0.1:${port}/json/version`, {
-      signal: AbortSignal.timeout(2000),
-    });
-    if (!response.ok) throw new Error(String(response.status));
-    misses = 0;
-  } catch {
-    if (++misses >= 2) finish(0);
-  }
-}, checkMs).unref();
+if (require.main === module) main();
+module.exports = { Tracker };
