@@ -23,8 +23,12 @@ RUN gpg --import /tmp/awscli.pub \
 FROM debian:trixie-slim AS novnc
 ARG NOVNC_VERSION=1.7.0
 ARG NOVNC_COMMIT=63107bd06d9e1f6136ff21aeda8cd62cbf0d433e
-RUN apt-get update     && apt-get install -y --no-install-recommends ca-certificates git
-RUN git clone --quiet --depth 1 --branch "v${NOVNC_VERSION}" https://github.com/novnc/noVNC.git /tmp/src     && test "$(git -C /tmp/src rev-parse HEAD)" = "${NOVNC_COMMIT}"     && mkdir -p /out     && cp -r /tmp/src/core /tmp/src/vendor /tmp/src/LICENSE.txt /out/
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git
+RUN git clone --quiet --depth 1 --branch "v${NOVNC_VERSION}" https://github.com/novnc/noVNC.git /tmp/src \
+    && test "$(git -C /tmp/src rev-parse HEAD)" = "${NOVNC_COMMIT}" \
+    && mkdir -p /out \
+    && cp -r /tmp/src/core /tmp/src/vendor /tmp/src/LICENSE.txt /out/
 
 FROM debian:trixie-slim
 ARG NODE_MAJOR=24
@@ -53,7 +57,8 @@ RUN ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws \
     && ln -s /usr/local/aws-cli/v2/current/bin/aws_completer /usr/local/bin/aws_completer
 RUN useradd --create-home --uid 1000 --shell /bin/bash computer \
     && echo 'computer ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/computer \
-    && chmod 0440 /etc/sudoers.d/computer     && mkdir -m 1777 /tmp/.X11-unix
+    && chmod 0440 /etc/sudoers.d/computer \
+    && mkdir -m 1777 /tmp/.X11-unix
 COPY --chmod=0644 crates/computerd/image/profile.sh /etc/profile.d/computer.sh
 COPY --chmod=0644 crates/computerd/image/XTerm /etc/X11/app-defaults/XTerm
 COPY --chmod=0755 crates/computerd/image/check-tools.sh /usr/local/bin/check-tools
