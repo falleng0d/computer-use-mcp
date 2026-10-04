@@ -33,10 +33,10 @@ RUN git clone --quiet --depth 1 --branch "v${NOVNC_VERSION}" https://github.com/
 FROM debian:trixie-slim
 ARG NODE_MAJOR=24
 # apt lists stay in the image so `sudo apt-get install` works without an update first.
-# One LibreOffice profile per X display, so each screen runs its own instance.
+# The bootstraprc sed gives each X display its own LibreOffice profile, so each screen runs its own instance.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        locales tzdata tigervnc-standalone-server fluxbox tint2 xterm chromium xdg-utils shared-mime-info xkb-data x11-utils imagemagick hsetroot libreoffice-writer libreoffice-calc libreoffice-impress libfile-mimeinfo-perl\
+        locales tzdata tigervnc-standalone-server fluxbox tint2 xterm chromium xdg-utils shared-mime-info xkb-data x11-utils imagemagick hsetroot libreoffice-writer libreoffice-calc libreoffice-impress libfile-mimeinfo-perl \
         fonts-dejavu-core fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
         sudo ca-certificates curl git openssh-client jq ripgrep xclip xsel \
         python3 python3-pip python3-venv ruby build-essential fish \
@@ -59,7 +59,8 @@ RUN ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws \
     && ln -s /usr/local/aws-cli/v2/current/bin/aws_completer /usr/local/bin/aws_completer
 ARG MCPC_VERSION=0.7.0
 ARG CHROME_DEVTOOLS_MCP_VERSION=1.10.1
-RUN npm install -g --no-fund --no-audit "@apify/mcpc@${MCPC_VERSION}" "chrome-devtools-mcp@${CHROME_DEVTOOLS_MCP_VERSION}"     && npm cache clean --force
+RUN npm install -g --no-fund --no-audit "@apify/mcpc@${MCPC_VERSION}" "chrome-devtools-mcp@${CHROME_DEVTOOLS_MCP_VERSION}" \
+    && npm cache clean --force
 RUN useradd --create-home --uid 1000 --shell /bin/bash computer \
     && echo 'computer ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/computer \
     && chmod 0440 /etc/sudoers.d/computer \
