@@ -4,7 +4,9 @@ use std::{
     fmt::Write as _,
     io::{self, BufWriter},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Duration,
+    time::Instant,
 };
 
 use anyhow::{Context, anyhow};
@@ -16,7 +18,7 @@ use computer_transfer::{
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::Client;
@@ -85,6 +87,20 @@ pub(crate) fn describe(reply: &TransferReply, took: Duration) -> String {
     text
 }
 
+/// Waits until nothing was taken from the outgoing data for `stall`.
+async fn idle_for(last_taken: &Mutex<Instant>, stall: Duration) {
+    loop {
+        let last = *last_taken
+            .lock()
+            .expect("the progress time is only set or read");
+        let due = last + stall;
+        if due <= Instant::now() {
+            return;
+        }
+        tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await;
+    }
+}
+
 /// Copies from the host to the computer.
 pub(crate) async fn to_computer(
     client: &Client,
@@ -118,7 +134,7 @@ pub(crate) async fn to_computer(
     let cancel = CancellationToken::new();
     let _stop_on_drop = cancel.clone().drop_guard();
     let (tx, rx) = mpsc::channel(CHANNEL_CHUNKS);
-    let (handed_over_tx, handed_over_rx) = oneshot::channel();
+    let last_taken = Arc::new(Mutex::new(Instant::now()));
     let writer = SyncWriter::new(tx, cancel.clone(), stall);
     let packing = tokio::task::spawn_blocking(move || {
         let mut out = BufWriter::with_capacity(CHUNK, writer);
@@ -129,18 +145,17 @@ pub(crate) async fn to_computer(
         }
         packed
     });
-    let body = reqwest::Body::wrap_stream(futures_util::stream::unfold(
-        (rx, Some(handed_over_tx)),
-        |(mut rx, mut handed_over)| async {
+    let progress = last_taken.clone();
+    let body = reqwest::Body::wrap_stream(futures_util::stream::unfold(rx, move |mut rx| {
+        let progress = progress.clone();
+        async move {
             let chunk = rx.recv().await;
-            if chunk.is_none()
-                && let Some(handed_over) = handed_over.take()
-            {
-                let _ = handed_over.send(());
-            }
-            chunk.map(|chunk| (chunk, (rx, handed_over)))
-        },
-    ));
+            *progress
+                .lock()
+                .expect("the progress time is only set or read") = Instant::now();
+            chunk.map(|chunk| (chunk, rx))
+        }
+    }));
     let query = UploadQuery {
         path: computer_path,
         overwrite,
@@ -149,11 +164,8 @@ pub(crate) async fn to_computer(
     tokio::pin!(upload);
     let sent = tokio::select! {
         sent = &mut upload => sent,
-        () = async {
-            let _ = handed_over_rx.await;
-            tokio::time::sleep(stall).await;
-        } => Err(anyhow!(
-            "the computer did not answer within {} s after the last data was sent",
+        () = idle_for(&last_taken, stall) => Err(anyhow!(
+            "the computer took no data and gave no answer for {} s",
             stall.as_secs_f64()
         )),
     };
@@ -331,6 +343,27 @@ mod tests {
         port
     }
 
+    /// Answers the destination check, then holds every upload connection open without reading it.
+    async fn mute_computer() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let (mut conn, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut head = vec![0u8; 8192];
+                    let n = conn.read(&mut head).await.unwrap_or(0);
+                    if String::from_utf8_lossy(&head[..n]).contains("upload-check") {
+                        let _ = conn.write_all(NO_CONTENT).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                });
+            }
+        });
+        port
+    }
+
     fn client_for(port: u16, stall: Duration) -> Client {
         let endpoint = Endpoint {
             port,
@@ -349,8 +382,12 @@ mod tests {
     }
 
     fn big_file() -> Remove {
+        file_of(16 * 1024 * 1024)
+    }
+
+    fn file_of(size: usize) -> Remove {
         let path = std::env::temp_dir().join(format!("computer-use-slow-{}", uuid::Uuid::new_v4()));
-        std::fs::write(&path, vec![b'x'; 16 * 1024 * 1024]).unwrap();
+        std::fs::write(&path, vec![b'x'; size]).unwrap();
         Remove(path)
     }
 
@@ -380,6 +417,23 @@ mod tests {
         let error = to_computer(&client, &session(), file.0.clone(), "~/x".to_owned(), false)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("did not answer"), "{error}");
+        assert!(error.to_string().contains("gave no answer"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_upload_fails_when_the_computer_holds_the_connection_but_stops_reading() {
+        let port = mute_computer().await;
+        let file = file_of(100 * 1024);
+        let client = client_for(port, Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        let error = tokio::time::timeout(
+            Duration::from_secs(20),
+            to_computer(&client, &session(), file.0.clone(), "~/x".to_owned(), false),
+        )
+        .await
+        .expect("the call must not hang")
+        .unwrap_err();
+        assert!(error.to_string().contains("gave no answer"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(15));
     }
 }

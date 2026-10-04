@@ -52,6 +52,15 @@ fn protocol_mismatch(computer_protocol: u32, computer_version: &str, container: 
     }
 }
 
+/// Transfers have no total or read timeout, since the data phase is bounded by the stall checks of the transfer itself.
+fn streaming_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .no_proxy()
+        .build()
+        .context("building the HTTP client for transfers")
+}
+
 pub(crate) struct Client {
     http: reqwest::Client,
     /// Has no total timeout, since a transfer takes as long as its data does. Waits for data are bounded by the read timeout.
@@ -69,11 +78,7 @@ impl Client {
             .no_proxy()
             .build()
             .context("building the HTTP client")?;
-        let streaming = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .no_proxy()
-            .build()
-            .context("building the HTTP client for transfers")?;
+        let streaming = streaming_client()?;
         Ok(Self {
             http,
             streaming,
