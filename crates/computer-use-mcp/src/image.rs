@@ -1,14 +1,18 @@
-pub const REGISTRY_IMAGE: &str = "ghcr.io/falleng0d/computer-use-mcp";
-pub const DEV_IMAGE: &str = "computer-use-mcp:dev";
-pub const IMAGE_ENV: &str = "COMPUTER_USE_IMAGE";
+use crate::settings;
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct Image {
-    pub reference: String,
-    pub pull: bool,
+const REGISTRY_IMAGE: &str = "ghcr.io/falleng0d/computer-use-mcp";
+pub(crate) const DEV_IMAGE: &str = "computer-use-mcp:dev";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Image {
+    pub(crate) reference: String,
+    pub(crate) pull: bool,
+    /// Images are ordered by release version, not by build time. True only for a release build
+    /// that runs its own published image.
+    pub(crate) by_version: bool,
 }
 
-pub fn select(release_version: Option<&str>, image_override: Option<&str>) -> Image {
+fn select(release_version: Option<&str>, image_override: Option<&str>) -> Image {
     let reference = match (image_override, release_version) {
         (Some(reference), _) => reference.to_owned(),
         (None, Some(version)) => format!("{REGISTRY_IMAGE}:{version}"),
@@ -17,16 +21,14 @@ pub fn select(release_version: Option<&str>, image_override: Option<&str>) -> Im
     Image {
         reference,
         pull: release_version.is_some(),
+        by_version: release_version.is_some() && image_override.is_none(),
     }
 }
 
-pub fn from_env() -> Image {
-    let image_override = std::env::var(IMAGE_ENV)
-        .ok()
-        .filter(|value| !value.is_empty());
+pub(crate) fn from_env() -> Image {
     select(
         computer_protocol::RELEASE_VERSION,
-        image_override.as_deref(),
+        settings::image_override().as_deref(),
     )
 }
 
@@ -41,6 +43,7 @@ mod tests {
             Image {
                 reference: "ghcr.io/falleng0d/computer-use-mcp:1.2.0-beta.1".to_owned(),
                 pull: true,
+                by_version: true,
             }
         );
     }
@@ -52,6 +55,7 @@ mod tests {
             Image {
                 reference: "computer-use-mcp:dev".to_owned(),
                 pull: false,
+                by_version: false,
             }
         );
     }
@@ -64,6 +68,7 @@ mod tests {
             Image {
                 reference: "my/image:x".to_owned(),
                 pull: true,
+                by_version: false,
             }
         );
     }

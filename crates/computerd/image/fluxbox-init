@@ -1,0 +1,4 @@
+session.screen0.strftimeFormat: %d %b, %a %H:%M
+session.screen0.workspaces: 1
+session.menuFile: /etc/computerd/fluxbox-menu
+session.appsFile: /etc/computerd/fluxbox-apps

@@ -1,0 +1,23 @@
+:root { color-scheme: dark; --bg: #14161a; --panel: #1c1f25; --line: #2c3038; --text: #e6e8ec; --muted: #8b93a1; --accent: #4f9cf9; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+body { display: flex; }
+#sidebar { width: 280px; flex: none; display: flex; flex-direction: column; background: var(--panel); border-right: 1px solid var(--line); }
+#sidebar h1 { margin: 0; padding: 14px 16px; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+#status { padding: 0 16px 10px; color: var(--muted); font-size: 12px; min-height: 1.4em; }
+#status.bad { color: #f0846b; }
+#sessions { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
+#sessions li button { all: unset; box-sizing: border-box; display: block; width: 100%; padding: 10px 16px; cursor: pointer; border-left: 3px solid transparent; }
+#sessions li button:hover:not(:disabled) { background: #232730; }
+#sessions li button:disabled { cursor: default; opacity: .6; }
+#sessions li.selected button { background: #232730; border-left-color: var(--accent); }
+@keyframes flash { 0%, 60% { background: #2c4a73; } 100% { background: transparent; } }
+#sessions li.flash button { animation: flash 3s ease-out; }
+.title { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta { display: block; color: var(--muted); font-size: 12px; }
+#stage { position: relative; flex: 1; min-width: 0; }
+#screen { position: absolute; inset: 0; }
+#message { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 12px; align-items: center; justify-content: center; text-align: center; padding: 24px; color: var(--muted); font-size: 16px; pointer-events: none; }
+#message button { pointer-events: auto; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
+#banner { position: absolute; top: 0; left: 0; right: 0; padding: 6px 12px; background: #5a4a14; color: #ffe9a8; font-size: 12px; text-align: center; z-index: 2; }
+[hidden] { display: none !important; }

@@ -1,0 +1,12 @@
+{
+  "ExtensionSettings": {
+    "ddkjiahejlhfcafbddmgiahcphecmpfh": {
+      "installation_mode": "normal_installed",
+      "update_url": "https://clients2.google.com/service/update2/crx"
+    }
+  },
+  "DefaultBrowserSettingEnabled": false,
+  "MetricsReportingEnabled": false,
+  "BrowserSignin": 0,
+  "SyncDisabled": true
+}

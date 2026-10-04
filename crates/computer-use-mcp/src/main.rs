@@ -1,6 +1,16 @@
+mod client;
+mod computer;
+mod docker_host;
+mod file_result;
 mod image;
+mod observation;
+mod open;
+mod server;
+mod settings;
+mod shell_result;
+mod upgrade;
 
-use anyhow::bail;
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -16,7 +26,8 @@ enum Command {
     Info,
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Some(Command::Info) => {
             let image = image::from_env();
@@ -24,8 +35,118 @@ fn main() -> anyhow::Result<()> {
             println!("protocol: {}", computer_protocol::PROTOCOL_VERSION);
             println!("image: {}", image.reference);
             println!("pull if missing: {}", image.pull);
+            println!("{}", docker_line());
+            for line in computer_lines(&image).await {
+                println!("{line}");
+            }
+            println!("viewer: {}", viewer_line(&image).await);
             Ok(())
         }
-        None => bail!("the MCP server is not implemented yet"),
+        None => serve().await,
     }
+}
+
+const INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The Docker endpoint in use and why, or why none can be chosen.
+fn docker_line() -> String {
+    match docker_host::from_env() {
+        Ok(resolved) => format!("docker: {resolved}"),
+        Err(error) => format!("docker: unavailable ({error:#})"),
+    }
+}
+
+/// What `info` says about the computer container, one `key: value` line each.
+async fn computer_lines(image: &image::Image) -> Vec<String> {
+    let look = async {
+        let docked = computer::Docked::connect(computer::Settings::from_env(), image.clone())?;
+        docked.describe().await
+    };
+    match tokio::time::timeout(INFO_TIMEOUT, look).await {
+        Ok(Ok(lines)) => lines,
+        Ok(Err(error)) => vec![format!("computer: unavailable ({error:#})")],
+        Err(_) => vec!["computer: unavailable (timed out)".to_owned()],
+    }
+}
+
+/// The viewer link of the running computer, or why there is none.
+async fn viewer_line(image: &image::Image) -> String {
+    let look = async {
+        let docked = computer::Docked::connect(computer::Settings::from_env(), image.clone())?;
+        let Some(endpoint) = docked.running_endpoint().await? else {
+            return Ok("the computer is not running, call start_computer to start it".to_owned());
+        };
+        let Some(port) = endpoint.viewer_port else {
+            return Ok("this computer predates the viewer, remove it with `docker rm` so it is created again".to_owned());
+        };
+        let info = client::Client::new(&endpoint)?.viewer().await?;
+        Ok::<_, anyhow::Error>(computer_protocol::viewer_link(port, &info.key))
+    };
+    match tokio::time::timeout(INFO_TIMEOUT, look).await {
+        Ok(Ok(line)) => line,
+        Ok(Err(error)) => format!("unavailable ({error:#})"),
+        Err(_) => "unavailable (timed out)".to_owned(),
+    }
+}
+
+async fn serve() -> anyhow::Result<()> {
+    use rmcp::{ServiceExt, transport::stdio};
+
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
+    tracing::info!(version = computer_protocol::VERSION, "MCP server starting");
+    let _ = tokio::task::spawn_blocking(open::remove_stale_password_files).await;
+    let server = server::Server::from_env();
+    let running = server
+        .clone()
+        .serve(stdio())
+        .await
+        .context("starting the MCP server")?;
+    let stop = running.cancellation_token();
+    let waited = tokio::select! {
+        result = running.waiting() => result.map(|_| ()).context("running the MCP server"),
+        () = shutdown_signal() => {
+            stop.cancel();
+            Ok(())
+        }
+    };
+    server.shutdown().await;
+    waited
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let (Ok(mut terminate), Ok(mut hangup)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::hangup()),
+    ) else {
+        let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+        _ = hangup.recv() => {}
+    }
+}
+
+#[cfg(windows)]
+async fn shutdown_signal() {
+    let Ok(mut close) = tokio::signal::windows::ctrl_close() else {
+        let _ = tokio::signal::ctrl_c().await;
+        return;
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = close.recv() => {}
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
