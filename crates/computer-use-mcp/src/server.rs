@@ -397,7 +397,7 @@ impl Server {
         let docked = self.docked().await?;
         let endpoint = {
             let _starting = self.start_lock.lock().await;
-            docked.ensure_running().await?
+            Box::pin(docked.ensure_running()).await?
         };
         let client = Client::new(&endpoint)?;
         client.wait_until_ready(docked.name()).await?;
@@ -1747,5 +1747,137 @@ X-Viewer-Key: {key}
             .await
             .expect("a screen that is not open closes the connection");
         assert!(matches!(read, Ok(0) | Err(_)));
+    }
+
+    fn docker_cli(args: &[&str]) -> String {
+        let output = std::process::Command::new("docker")
+            .args(args)
+            .output()
+            .expect("the docker CLI runs");
+        assert!(
+            output.status.success(),
+            "docker {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// Removes the extra image tags a test made.
+    struct Tags(Vec<String>);
+
+    impl Drop for Tags {
+        fn drop(&mut self) {
+            for tag in &self.0 {
+                let _ = std::process::Command::new("docker")
+                    .args(["rmi", "--force", tag])
+                    .output();
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Docker"]
+    async fn a_stopped_computer_moves_to_a_newer_image_and_never_back() {
+        use std::io::Write;
+
+        let id = Uuid::new_v4().simple().to_string();
+        let (older, newer) = (
+            format!("computer-use-test-older:{id}"),
+            format!("computer-use-test-newer:{id}"),
+        );
+        let _tags = Tags(vec![newer.clone(), older.clone()]);
+        docker_cli(&["tag", image::DEV_IMAGE, &older]);
+        let mut build = std::process::Command::new("docker")
+            .args(["build", "--quiet", "-t", &newer, "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("the docker CLI runs");
+        write!(
+            build.stdin.take().unwrap(),
+            "FROM {older}
+USER root
+RUN echo newer > /newer
+USER computer
+"
+        )
+        .unwrap();
+        assert!(build.wait().unwrap().success());
+
+        let name = format!("computer-use-test-{id}");
+        let settings = Settings {
+            name: name.clone(),
+            timezone: None,
+            port_base: Ok(crate::computer::free_port_base()),
+        };
+        let docker = Docker::connect_with_defaults().unwrap();
+        let _cleanup = Cleanup {
+            docker: docker.clone(),
+            name: name.clone(),
+            volume: settings.volume(),
+        };
+        let server_on = |reference: &str| {
+            Server::new(
+                settings.clone(),
+                Image {
+                    reference: reference.to_owned(),
+                    pull: false,
+                    by_version: false,
+                },
+                Ok(ScreenSize::default()),
+                Ok(ShellTimeouts::default()),
+                parse_idle(None),
+                Ok(open::Mode::None),
+            )
+        };
+        let container_id = || docker_cli(&["inspect", "--format", "{{.Id}}", &name]);
+
+        let old_server = server_on(&older);
+        let first = old_server.start("first").await.unwrap();
+        let first_id = container_id();
+        let first_link = first.link.expect("the computer has a viewer link");
+        docker_cli(&[
+            "exec",
+            &name,
+            "sh",
+            "-c",
+            "echo kept > /home/computer/upgrade-check.txt",
+        ]);
+
+        let new_server = server_on(&newer);
+        new_server.start("while running").await.unwrap();
+        assert_eq!(
+            container_id(),
+            first_id,
+            "a running computer is not touched"
+        );
+        old_server.shutdown().await;
+        new_server.shutdown().await;
+
+        docker_cli(&["stop", "--time", "1", &name]);
+        let upgraded = server_on(&newer).start("after stop").await.unwrap();
+        let upgraded_id = container_id();
+        assert_ne!(upgraded_id, first_id, "the stopped computer is recreated");
+        assert_eq!(
+            docker_cli(&["inspect", "--format", "{{.Config.Image}}", &name]),
+            newer
+        );
+        assert_eq!(
+            docker_cli(&["exec", &name, "cat", "/home/computer/upgrade-check.txt"]),
+            "kept"
+        );
+        assert_eq!(
+            upgraded.link.as_deref(),
+            Some(first_link.as_str()),
+            "the port base and the viewer key survive"
+        );
+
+        docker_cli(&["stop", "--time", "1", &name]);
+        server_on(&older).start("old binary").await.unwrap();
+        assert_eq!(
+            container_id(),
+            upgraded_id,
+            "an older image never replaces a newer one"
+        );
     }
 }

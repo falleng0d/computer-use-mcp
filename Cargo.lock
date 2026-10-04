@@ -384,6 +384,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bollard",
+ "chrono",
  "clap",
  "computer-protocol",
  "des",
@@ -392,6 +393,7 @@ dependencies = [
  "reqwest",
  "rmcp",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "thiserror",

@@ -6,6 +6,7 @@ mod observation;
 mod open;
 mod server;
 mod shell_result;
+mod upgrade;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -32,6 +33,9 @@ async fn main() -> anyhow::Result<()> {
             println!("protocol: {}", computer_protocol::PROTOCOL_VERSION);
             println!("image: {}", image.reference);
             println!("pull if missing: {}", image.pull);
+            for line in computer_lines(&image).await {
+                println!("{line}");
+            }
             println!("viewer: {}", viewer_line(&image).await);
             Ok(())
         }
@@ -40,6 +44,19 @@ async fn main() -> anyhow::Result<()> {
 }
 
 const INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// What `info` says about the computer container, one `key: value` line each.
+async fn computer_lines(image: &image::Image) -> Vec<String> {
+    let look = async {
+        let docked = computer::Docked::connect(computer::Settings::from_env(), image.clone())?;
+        docked.describe().await
+    };
+    match tokio::time::timeout(INFO_TIMEOUT, look).await {
+        Ok(Ok(lines)) => lines,
+        Ok(Err(error)) => vec![format!("computer: unavailable ({error:#})")],
+        Err(_) => vec!["computer: unavailable (timed out)".to_owned()],
+    }
+}
 
 /// The viewer link of the running computer, or why there is none.
 async fn viewer_line(image: &image::Image) -> String {

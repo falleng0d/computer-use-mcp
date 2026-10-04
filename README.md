@@ -7,7 +7,7 @@ An MCP server that gives AI agents a computer. Any MCP client, such as Claude Co
 ## Design
 
 - There is one computer. It is a Docker container with a Docker volume for its home folder.
-- When an agent starts the MCP server, the server starts the container if it is stopped, or creates it if it does not exist. The server never stops the container.
+- When an agent starts the MCP server, the server starts the container if it is stopped, or creates it if it does not exist. The server never stops the container. The only time it removes one is a stopped container on an older image than the binary's, which it creates again on the newer image with the same home volume and the same ports. It never touches a running container and never moves the computer to an older image. To upgrade, run `docker stop` on the computer and call `start_computer`. `computer-use-mcp info` shows whether an upgrade is pending.
 - Every agent connected through the MCP server sees and controls the same desktop.
 - Files in the volume survive container restarts and container deletion. Only you stop or delete the computer, with `docker stop` or `docker rm`.
 - The computer is Debian 13 with Python 3, uv, Node.js 24 (LTS), Git, `gh`, the AWS CLI v2, Ruby, fish (bash stays the default shell), build tools, ripgrep, ImageMagick, clipboard tools, and fonts for Latin, CJK, and emoji.
@@ -29,7 +29,7 @@ The project has three Rust crates:
 3. On macOS, the binary is not signed. If you downloaded it with a browser, remove the quarantine flag with `xattr -d com.apple.quarantine computer-use-mcp`.
 4. The image lives in a private GitHub registry. Log in once with a token that has the `read:packages` scope, using `docker login ghcr.io -u <github-user>`.
 
-Add it to your agent host as an MCP server that runs `computer-use-mcp` with no arguments. Check the install with `computer-use-mcp info`. It prints the version and the image the binary uses.
+Add it to your agent host as an MCP server that runs `computer-use-mcp` with no arguments. Check the install with `computer-use-mcp info`. It prints the version, the image the binary uses, and the state, image version, and pending upgrade of the computer.
 
 ## Configuration
 

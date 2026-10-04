@@ -18,7 +18,10 @@ use futures_util::StreamExt;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::image::Image;
+use crate::{
+    image::Image,
+    upgrade::{self, Compare, ImageFacts},
+};
 
 pub const NAME_ENV: &str = "COMPUTER_USE_NAME";
 pub const PORT_BASE_ENV: &str = "COMPUTER_USE_PORT_BASE";
@@ -95,16 +98,21 @@ pub struct Endpoint {
 pub enum Plan {
     Create,
     Start,
+    /// Remove the stopped container and create it again on the wanted image.
+    Recreate,
     Reuse,
     Refuse(&'static str),
 }
 
-pub fn plan(status: Option<ContainerStateStatusEnum>) -> Plan {
+/// Picks what to do from the container's state, and whether the wanted image is newer than the
+/// one the container was made from. Only a stopped container is ever recreated.
+pub fn plan(status: Option<ContainerStateStatusEnum>, newer_image: bool) -> Plan {
     use ContainerStateStatusEnum::{
         CREATED, DEAD, EXITED, PAUSED, REMOVING, RESTARTING, RUNNING, STOPPING,
     };
     match status {
         None => Plan::Create,
+        Some(CREATED | EXITED) if newer_image => Plan::Recreate,
         Some(CREATED | EXITED) => Plan::Start,
         Some(RUNNING | RESTARTING) => Plan::Reuse,
         Some(PAUSED) => Plan::Refuse("the computer is paused, run `docker unpause` on it"),
@@ -285,6 +293,26 @@ pub fn free_port_base() -> u16 {
         .expect("a free block of ports exists")
 }
 
+fn is_stopped(status: Option<ContainerStateStatusEnum>) -> bool {
+    matches!(
+        status,
+        Some(ContainerStateStatusEnum::CREATED | ContainerStateStatusEnum::EXITED)
+    )
+}
+
+/// Host port the viewer page was published on when the container was created.
+fn configured_port_base(inspect: &ContainerInspectResponse) -> Option<u16> {
+    inspect
+        .host_config
+        .as_ref()?
+        .port_bindings
+        .as_ref()?
+        .get(&format!("{VIEWER_PORT}/tcp"))?
+        .as_ref()?
+        .iter()
+        .find_map(|binding| binding.host_port.as_deref()?.parse().ok())
+}
+
 fn status_of(inspect: &ContainerInspectResponse) -> Option<ContainerStateStatusEnum> {
     inspect.state.as_ref().and_then(|state| state.status)
 }
@@ -319,6 +347,15 @@ fn is_not_found(error: &anyhow::Error) -> bool {
 
 fn is_conflict(error: &anyhow::Error) -> bool {
     has_status(error, 409)
+}
+
+/// Why a computer is being created.
+enum Origin {
+    New,
+    /// Another container is being replaced. `port_base` is the one it was published on, if any.
+    Replacing {
+        port_base: Option<u16>,
+    },
 }
 
 /// Docker side of the computer: creates it, starts it, and finds its endpoint.
@@ -369,10 +406,29 @@ impl Docked {
     }
 
     /// Creates or starts the computer as needed and returns its endpoint.
+    ///
+    /// A stopped computer on an older image is removed and created again on the wanted image. A
+    /// running one is never touched.
     pub async fn ensure_running(&self) -> Result<Endpoint> {
-        let name = &self.settings.name;
         let found = self.inspect().await?;
-        match plan(found.as_ref().and_then(status_of)) {
+        let status = found.as_ref().and_then(status_of);
+        let newer_image = match &found {
+            Some(found) if is_stopped(status) => self.wanted_image_is_newer(found).await,
+            _ => false,
+        };
+        match plan(status, newer_image) {
+            Plan::Recreate => {
+                let old = found.expect("a computer is only recreated when it exists");
+                Box::pin(self.recreate(&old)).await?;
+            }
+            other => self.apply(other).await?,
+        }
+        self.wait_for_endpoint().await
+    }
+
+    async fn apply(&self, plan: Plan) -> Result<()> {
+        let name = &self.settings.name;
+        match plan {
             Plan::Refuse(reason) => bail!("{reason} (container `{name}`)"),
             Plan::Reuse => {}
             Plan::Start => {
@@ -381,9 +437,166 @@ impl Docked {
                     .await
                     .map_err(|error| explain_start_error(error, false))?;
             }
-            Plan::Create => self.create().await?,
+            Plan::Create => self.create(Origin::New).await?,
+            Plan::Recreate => unreachable!("recreating is handled before apply"),
         }
-        self.wait_for_endpoint().await
+        Ok(())
+    }
+
+    pub fn compare(&self) -> Compare {
+        if self.image.by_version {
+            Compare::Version
+        } else {
+            Compare::Created
+        }
+    }
+
+    async fn image_facts(&self, reference: &str) -> Result<ImageFacts> {
+        let inspect = within(
+            "looking for the computer image",
+            DOCKER_TIMEOUT,
+            self.docker.inspect_image(reference),
+        )
+        .await?;
+        ImageFacts::from_inspect(&inspect)
+            .ok_or_else(|| anyhow!("Docker returned no ID for image `{reference}`"))
+    }
+
+    /// Facts about the image this build wants, `None` when it is not available locally.
+    pub async fn wanted_image(&self) -> Result<Option<ImageFacts>> {
+        match self.image_facts(&self.image.reference).await {
+            Ok(facts) => Ok(Some(facts)),
+            Err(error) if is_not_found(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Facts about the image an existing container was made from.
+    pub async fn container_image(&self, found: &ContainerInspectResponse) -> Result<ImageFacts> {
+        let id = found
+            .image
+            .as_deref()
+            .ok_or_else(|| anyhow!("the container does not name its image"))?;
+        self.image_facts(id).await
+    }
+
+    /// Lines for `info` about the computer container, if there is one.
+    pub async fn describe(&self) -> Result<Vec<String>> {
+        let name = &self.settings.name;
+        let Some(found) = self.inspect().await? else {
+            return Ok(vec![format!(
+                "computer: none yet (container `{name}`), call start_computer to create it"
+            )]);
+        };
+        let status = found.state.as_ref().and_then(|state| state.status);
+        let state = status.map_or_else(|| "unknown".to_owned(), |status| status.to_string());
+        let mut lines = vec![format!("computer: {state} (container `{name}`)")];
+        match configured_port_base(&found) {
+            Some(base) => lines.push(format!("port base: {base}")),
+            None => lines.push("port base: none, this computer predates the viewer".to_owned()),
+        }
+        let have = match self.container_image(&found).await {
+            Ok(have) => have,
+            Err(error) => {
+                lines.push(format!("computer image: unavailable ({error:#})"));
+                return Ok(lines);
+            }
+        };
+        lines.push(format!(
+            "computer image: version {}, image {}",
+            have.version.as_deref().unwrap_or("unknown"),
+            have.short_id()
+        ));
+        let upgrade = match self.wanted_image().await {
+            Ok(Some(wanted)) if upgrade::is_newer(&have, &wanted, self.compare()) => {
+                if is_stopped(status) {
+                    "pending, the computer will be recreated on the next start_computer"
+                } else {
+                    "pending, it happens on start_computer after the computer is stopped (`docker stop`)"
+                }
+            }
+            Ok(Some(wanted)) if upgrade::is_newer(&wanted, &have, self.compare()) => {
+                "none, the computer is on a newer image than this build, update the binary"
+            }
+            Ok(Some(_)) => "none, the computer is on this build's image",
+            Ok(None) => "unknown, this build's image is not available locally",
+            Err(_) => "unknown, could not inspect this build's image",
+        };
+        lines.push(format!("upgrade: {upgrade}"));
+        Ok(lines)
+    }
+
+    /// Whether the image this build wants is newer than the one the container was made from.
+    /// Anything that cannot be found out counts as no, so the computer starts as it is.
+    async fn wanted_image_is_newer(&self, found: &ContainerInspectResponse) -> bool {
+        let decide = async {
+            self.ensure_image().await?;
+            let wanted = self.image_facts(&self.image.reference).await?;
+            let have = self.container_image(found).await?;
+            Ok::<_, anyhow::Error>((
+                upgrade::is_newer(&have, &wanted, self.compare()),
+                have,
+                wanted,
+            ))
+        };
+        match decide.await {
+            Ok((newer, have, wanted)) => {
+                if newer {
+                    info!(
+                        container = %self.settings.name,
+                        from_version = have.version.as_deref().unwrap_or("unknown"),
+                        from_image = have.short_id(),
+                        to_version = wanted.version.as_deref().unwrap_or("unknown"),
+                        to_image = wanted.short_id(),
+                        "the stopped computer is on an older image, recreating it"
+                    );
+                }
+                newer
+            }
+            Err(error) => {
+                warn!(error = %format!("{error:#}"), "could not check for a newer computer image, starting the computer as it is");
+                false
+            }
+        }
+    }
+
+    /// Removes the stopped container `old` and creates it again on the wanted image, keeping its
+    /// ports. Home is a volume and stays.
+    async fn recreate(&self, old: &ContainerInspectResponse) -> Result<()> {
+        let name = &self.settings.name;
+        let id = old
+            .id
+            .as_deref()
+            .ok_or_else(|| anyhow!("the computer container has no ID"))?;
+        let still_stopped = match self.inspect().await? {
+            Some(now) => now.id.as_deref() == Some(id) && is_stopped(status_of(&now)),
+            None => false,
+        };
+        let removed = still_stopped && {
+            let options = RemoveContainerOptionsBuilder::new().force(false).build();
+            let result = within(
+                "removing the old computer container",
+                DOCKER_TIMEOUT,
+                self.docker.remove_container(id, Some(options)),
+            )
+            .await;
+            match result {
+                Ok(()) => true,
+                Err(error) if is_not_found(&error) || is_conflict(&error) => false,
+                Err(error) => return Err(error),
+            }
+        };
+        if !removed {
+            info!(container = %name, "another process changed the computer while upgrading, using its container");
+            let now = self.inspect().await?;
+            return self
+                .apply(plan(now.as_ref().and_then(status_of), false))
+                .await;
+        }
+        self.create(Origin::Replacing {
+            port_base: configured_port_base(old),
+        })
+        .await
     }
 
     /// Docker reserves the name before the container can be inspected or started.
@@ -423,13 +636,21 @@ impl Docked {
         }
     }
 
-    async fn create(&self) -> Result<()> {
+    /// Creates and starts the computer. A replacement keeps the port base of the container it
+    /// replaces, so links to it keep working.
+    async fn create(&self, origin: Origin) -> Result<()> {
         let name = &self.settings.name;
-        let port_base = self
-            .settings
-            .port_base
-            .clone()
-            .map_err(|message| anyhow!(message))?;
+        let recreating = matches!(origin, Origin::Replacing { .. });
+        let port_base = match origin {
+            Origin::Replacing {
+                port_base: Some(base),
+            } => base,
+            Origin::New | Origin::Replacing { port_base: None } => self
+                .settings
+                .port_base
+                .clone()
+                .map_err(|message| anyhow!(message))?,
+        };
         self.ensure_image().await?;
         let volume = self.settings.volume();
         within(
@@ -466,8 +687,8 @@ impl Docked {
         let Err(error) = self.start_container().await else {
             return Ok(());
         };
-        let explained = explain_start_error(error, made_here);
-        if made_here && explained.is::<PortConflict>() {
+        let explained = explain_start_error(error, made_here && !recreating);
+        if made_here && !recreating && explained.is::<PortConflict>() {
             let remove = RemoveContainerOptionsBuilder::new().force(true).build();
             let _ = within(
                 "removing the computer that could not start",
@@ -528,14 +749,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plan_never_stops_or_recreates_an_existing_computer() {
+    fn plan_recreates_only_a_stopped_computer_on_an_older_image() {
         use ContainerStateStatusEnum::{CREATED, EXITED, PAUSED, RESTARTING, RUNNING};
-        assert_eq!(plan(None), Plan::Create);
-        assert_eq!(plan(Some(EXITED)), Plan::Start);
-        assert_eq!(plan(Some(CREATED)), Plan::Start);
-        assert_eq!(plan(Some(RUNNING)), Plan::Reuse);
-        assert_eq!(plan(Some(RESTARTING)), Plan::Reuse);
-        assert!(matches!(plan(Some(PAUSED)), Plan::Refuse(_)));
+        assert_eq!(plan(None, false), Plan::Create);
+        assert_eq!(plan(None, true), Plan::Create);
+        assert_eq!(plan(Some(EXITED), false), Plan::Start);
+        assert_eq!(plan(Some(CREATED), false), Plan::Start);
+        assert_eq!(plan(Some(EXITED), true), Plan::Recreate);
+        assert_eq!(plan(Some(CREATED), true), Plan::Recreate);
+        assert_eq!(plan(Some(RUNNING), true), Plan::Reuse);
+        assert_eq!(plan(Some(RESTARTING), true), Plan::Reuse);
+        assert!(matches!(plan(Some(PAUSED), true), Plan::Refuse(_)));
+    }
+
+    #[test]
+    fn a_recreated_computer_keeps_the_port_base_of_the_old_one() {
+        let settings = Settings {
+            name: "box".to_owned(),
+            timezone: None,
+            port_base: Ok(30000),
+        };
+        let body = container_body(&settings, 31000, "img:1", "tok");
+        let old = ContainerInspectResponse {
+            host_config: body.host_config,
+            ..ContainerInspectResponse::default()
+        };
+        assert_eq!(configured_port_base(&old), Some(31000));
+        assert_eq!(
+            configured_port_base(&ContainerInspectResponse::default()),
+            None
+        );
     }
 
     #[test]

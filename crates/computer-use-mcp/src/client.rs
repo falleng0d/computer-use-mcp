@@ -35,6 +35,22 @@ pub struct UnknownSession {
     pub reason: Option<String>,
 }
 
+/// What an agent is told when the running computer speaks another protocol than this server.
+///
+/// An older computer is upgraded once it is stopped. A newer one is never moved back, so the
+/// server has to be updated instead.
+fn protocol_mismatch(computer_protocol: u32, computer_version: &str, container: &str) -> String {
+    if computer_protocol > PROTOCOL_VERSION {
+        format!(
+            "This computer runs protocol {computer_protocol} (version {computer_version}), newer than the protocol {PROTOCOL_VERSION} (version {VERSION}) this MCP server speaks. Update the computer-use-mcp binary. The computer is never moved to an older image."
+        )
+    } else {
+        format!(
+            "This computer runs protocol {computer_protocol} (version {computer_version}), but this MCP server speaks {PROTOCOL_VERSION} (version {VERSION}). Stop it (`docker stop {container}`) so the next call can upgrade it."
+        )
+    }
+}
+
 pub struct Client {
     http: reqwest::Client,
     base: String,
@@ -74,11 +90,11 @@ impl Client {
         let last_error = loop {
             match self.health().await {
                 Ok(health) if health.protocol_version == PROTOCOL_VERSION => return Ok(()),
-                Ok(health) => bail!(
-                    "the computer speaks protocol {} (version {}) but this server speaks {PROTOCOL_VERSION} (version {VERSION}), stop the computer with `docker stop {container}` so it can upgrade",
+                Ok(health) => bail!(protocol_mismatch(
                     health.protocol_version,
-                    health.version,
-                ),
+                    &health.version,
+                    container
+                )),
                 Err(error) if started.elapsed() >= HEALTH_DEADLINE => break error,
                 Err(_) => tokio::time::sleep(HEALTH_RETRY).await,
             }
@@ -385,5 +401,22 @@ async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
             "{}",
             message.unwrap_or_else(|| format!("the computer answered {status}"))
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mismatch_advice_depends_on_which_side_is_newer() {
+        let older = protocol_mismatch(PROTOCOL_VERSION - 1, "0.0.1", "box");
+        assert!(older.contains("`docker stop box`"), "{older}");
+        let newer = protocol_mismatch(PROTOCOL_VERSION + 1, "9.9.9", "box");
+        assert!(
+            newer.contains("Update the computer-use-mcp binary"),
+            "{newer}"
+        );
+        assert!(!newer.contains("docker stop"), "{newer}");
     }
 }

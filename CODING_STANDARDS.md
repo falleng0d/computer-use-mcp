@@ -12,7 +12,7 @@ These are the rules that matter most for this project. They are not a full Rust 
 ## Project rules
 
 - **stdout belongs to MCP.** The host binary speaks MCP over stdio. Anything else written to stdout breaks the client. Logs and diagnostics go to stderr. Only `info`, `--help`, and `--version` print to stdout.
-- **The MCP server never stops or removes the computer.** It may create or start the container. Stopping and deleting it is the user's job.
+- **The MCP server never stops the computer, and removes it in two cases only.** It may create or start the container. Stopping and deleting it is the user's job. The one removal is in `Docked::recreate`: a container that is stopped, re-inspected as still stopped under the same ID, and on an image older than the wanted one (`upgrade::is_newer`). It is removed by ID without force, then created again with the same name, volume, and port base. The other is a container the same call just created that could not publish its ports. Never remove a running container, never move to an older or unordered image, and never add another removal.
 - **The host binary must build and run on Windows and macOS.** Use `std::path` and `PathBuf`, never hand-built path strings. Keep Linux-only code (X11, `/proc`) in `computerd`.
 - **Shared wire types live in `computer-protocol`.** Bump `PROTOCOL_VERSION` on any breaking change to a request or response. Get the version string from `computer_protocol::VERSION`, never from `CARGO_PKG_VERSION`.
 - **Every call that leaves the process has a timeout.** That includes the Docker API, HTTP to `computerd`, and child processes. A hung call must turn into an error the agent can see.

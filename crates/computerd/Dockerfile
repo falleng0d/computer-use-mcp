@@ -59,6 +59,8 @@ COPY --chmod=0644 crates/computerd/image/XTerm /etc/X11/app-defaults/XTerm
 COPY --chmod=0755 crates/computerd/image/check-tools.sh /usr/local/bin/check-tools
 COPY --from=build /usr/local/bin/computerd /usr/local/bin/computerd
 COPY --from=novnc /out /opt/novnc
+ARG COMPUTER_USE_MCP_VERSION=""
+LABEL org.opencontainers.image.version="${COMPUTER_USE_MCP_VERSION}"
 COPY crates/computerd/image/fluxbox-init /etc/computerd/fluxbox-init
 COPY crates/computerd/image/fluxbox-menu /etc/computerd/fluxbox-menu
 COPY crates/computerd/image/chromium-policy.json /etc/chromium/policies/managed/computer-use.json

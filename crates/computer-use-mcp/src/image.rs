@@ -6,6 +6,9 @@ pub const IMAGE_ENV: &str = "COMPUTER_USE_IMAGE";
 pub struct Image {
     pub reference: String,
     pub pull: bool,
+    /// Images are ordered by release version, not by build time. True only for a release build
+    /// that runs its own published image.
+    pub by_version: bool,
 }
 
 pub fn select(release_version: Option<&str>, image_override: Option<&str>) -> Image {
@@ -17,6 +20,7 @@ pub fn select(release_version: Option<&str>, image_override: Option<&str>) -> Im
     Image {
         reference,
         pull: release_version.is_some(),
+        by_version: release_version.is_some() && image_override.is_none(),
     }
 }
 
@@ -41,6 +45,7 @@ mod tests {
             Image {
                 reference: "ghcr.io/falleng0d/computer-use-mcp:1.2.0-beta.1".to_owned(),
                 pull: true,
+                by_version: true,
             }
         );
     }
@@ -52,6 +57,7 @@ mod tests {
             Image {
                 reference: "computer-use-mcp:dev".to_owned(),
                 pull: false,
+                by_version: false,
             }
         );
     }
@@ -64,6 +70,7 @@ mod tests {
             Image {
                 reference: "my/image:x".to_owned(),
                 pull: true,
+                by_version: false,
             }
         );
     }
