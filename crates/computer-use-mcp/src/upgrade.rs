@@ -56,7 +56,7 @@ fn parse_version(version: &str) -> Option<Version> {
 /// Whether `wanted` is strictly newer than `have`.
 ///
 /// An image without a readable version is older than any image with one. The same image, an older image, and an image that cannot be
-/// ordered are never newer, so a computer never moves backwards.
+/// ordered (a version that is not semver) are never newer, so a computer never moves backwards.
 pub fn is_newer(have: &ImageFacts, wanted: &ImageFacts, by: Compare) -> bool {
     if have.id == wanted.id {
         return false;
@@ -66,9 +66,9 @@ pub fn is_newer(have: &ImageFacts, wanted: &ImageFacts, by: Compare) -> bool {
             let Some(wanted) = wanted.version.as_deref().and_then(parse_version) else {
                 return false;
             };
-            match have.version.as_deref().and_then(parse_version) {
-                Some(have) => wanted > have,
+            match have.version.as_deref() {
                 None => true,
+                Some(have) => parse_version(have).is_some_and(|have| wanted > have),
             }
         }
         Compare::Created => match (have.created, wanted.created) {
@@ -111,10 +111,10 @@ mod tests {
     }
 
     #[test]
-    fn a_computer_without_a_version_is_older_than_any_release() {
+    fn a_missing_version_is_older_but_an_unreadable_one_is_left_alone() {
         let wanted = facts("b", Some("0.1.0"), None);
         assert!(is_newer(&facts("a", None, None), &wanted, Compare::Version));
-        assert!(is_newer(
+        assert!(!is_newer(
             &facts("a", Some("garbage"), None),
             &wanted,
             Compare::Version

@@ -96,31 +96,45 @@ pub struct Endpoint {
 /// What to do with the container that `start_computer` found.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Plan {
+    Do(Step),
+    /// Remove the exited container and create it again on the wanted image.
+    Recreate,
+}
+
+/// A way to get a usable container that removes nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Step {
     Create,
     Start,
-    /// Remove the stopped container and create it again on the wanted image.
-    Recreate,
     Reuse,
     Refuse(&'static str),
 }
 
 /// Picks what to do from the container's state, and whether the wanted image is newer than the
-/// one the container was made from. Only a stopped container is ever recreated.
+/// one the container was made from. Only an exited container is ever recreated. A container that
+/// is only `created` may be about to be started by another process.
 pub fn plan(status: Option<ContainerStateStatusEnum>, newer_image: bool) -> Plan {
+    if newer_image && is_exited(status) {
+        Plan::Recreate
+    } else {
+        Plan::Do(step(status))
+    }
+}
+
+pub fn step(status: Option<ContainerStateStatusEnum>) -> Step {
     use ContainerStateStatusEnum::{
         CREATED, DEAD, EXITED, PAUSED, REMOVING, RESTARTING, RUNNING, STOPPING,
     };
     match status {
-        None => Plan::Create,
-        Some(CREATED | EXITED) if newer_image => Plan::Recreate,
-        Some(CREATED | EXITED) => Plan::Start,
-        Some(RUNNING | RESTARTING) => Plan::Reuse,
-        Some(PAUSED) => Plan::Refuse("the computer is paused, run `docker unpause` on it"),
-        Some(REMOVING | DEAD | STOPPING) => Plan::Refuse(
+        None => Step::Create,
+        Some(CREATED | EXITED) => Step::Start,
+        Some(RUNNING | RESTARTING) => Step::Reuse,
+        Some(PAUSED) => Step::Refuse("the computer is paused, run `docker unpause` on it"),
+        Some(REMOVING | DEAD | STOPPING) => Step::Refuse(
             "the computer is stopping, being removed, or dead, wait or remove it and retry",
         ),
         Some(ContainerStateStatusEnum::EMPTY) => {
-            Plan::Refuse("the computer is in an unknown state")
+            Step::Refuse("the computer is in an unknown state")
         }
     }
 }
@@ -182,9 +196,8 @@ fn labels() -> HashMap<String, String> {
     HashMap::from([(PROJECT_LABEL.to_owned(), "true".to_owned())])
 }
 
-/// Reads the published `computerd` port and the token from an inspected container.
-pub fn endpoint_from(inspect: &ContainerInspectResponse) -> Result<Endpoint> {
-    let token = inspect
+fn endpoint_token(inspect: &ContainerInspectResponse) -> Option<&str> {
+    inspect
         .config
         .as_ref()
         .and_then(|config| config.env.as_ref())
@@ -192,6 +205,11 @@ pub fn endpoint_from(inspect: &ContainerInspectResponse) -> Result<Endpoint> {
         .flatten()
         .find_map(|var| var.strip_prefix(&format!("{TOKEN_ENV}=")))
         .filter(|token| !token.is_empty())
+}
+
+/// Reads the published `computerd` port and the token from an inspected container.
+pub fn endpoint_from(inspect: &ContainerInspectResponse) -> Result<Endpoint> {
+    let token = endpoint_token(inspect)
         .ok_or_else(|| anyhow!("the container has no {TOKEN_ENV}, it was not made by this tool"))?
         .to_owned();
     let published = |container: u16| -> Option<u16> {
@@ -293,11 +311,18 @@ pub fn free_port_base() -> u16 {
         .expect("a free block of ports exists")
 }
 
-fn is_stopped(status: Option<ContainerStateStatusEnum>) -> bool {
-    matches!(
-        status,
-        Some(ContainerStateStatusEnum::CREATED | ContainerStateStatusEnum::EXITED)
-    )
+fn is_exited(status: Option<ContainerStateStatusEnum>) -> bool {
+    status == Some(ContainerStateStatusEnum::EXITED)
+}
+
+/// Whether this tool made the container, which is the only kind it may remove.
+fn is_ours(inspect: &ContainerInspectResponse) -> bool {
+    let labelled = inspect
+        .config
+        .as_ref()
+        .and_then(|config| config.labels.as_ref())
+        .is_some_and(|labels| labels.contains_key(PROJECT_LABEL));
+    labelled && endpoint_token(inspect).is_some()
 }
 
 /// Host port the viewer page was published on when the container was created.
@@ -413,7 +438,9 @@ impl Docked {
         let found = self.inspect().await?;
         let status = found.as_ref().and_then(status_of);
         let newer_image = match &found {
-            Some(found) if is_stopped(status) => self.wanted_image_is_newer(found).await,
+            Some(found) if is_exited(status) && is_ours(found) => {
+                self.wanted_image_is_newer(found).await
+            }
             _ => false,
         };
         match plan(status, newer_image) {
@@ -421,24 +448,23 @@ impl Docked {
                 let old = found.expect("a computer is only recreated when it exists");
                 Box::pin(self.recreate(&old)).await?;
             }
-            other => self.apply(other).await?,
+            Plan::Do(step) => self.apply(step).await?,
         }
         self.wait_for_endpoint().await
     }
 
-    async fn apply(&self, plan: Plan) -> Result<()> {
+    async fn apply(&self, step: Step) -> Result<()> {
         let name = &self.settings.name;
-        match plan {
-            Plan::Refuse(reason) => bail!("{reason} (container `{name}`)"),
-            Plan::Reuse => {}
-            Plan::Start => {
+        match step {
+            Step::Refuse(reason) => bail!("{reason} (container `{name}`)"),
+            Step::Reuse => {}
+            Step::Start => {
                 info!(container = %name, "starting the computer");
                 self.start_container()
                     .await
                     .map_err(|error| explain_start_error(error, false))?;
             }
-            Plan::Create => self.create(Origin::New).await?,
-            Plan::Recreate => unreachable!("recreating is handled before apply"),
+            Step::Create => self.create(Origin::New).await?,
         }
         Ok(())
     }
@@ -508,8 +534,9 @@ impl Docked {
             have.short_id()
         ));
         let upgrade = match self.wanted_image().await {
+            Ok(_) if !is_ours(&found) => "none, this container was not made by this tool",
             Ok(Some(wanted)) if upgrade::is_newer(&have, &wanted, self.compare()) => {
-                if is_stopped(status) {
+                if is_exited(status) {
                     "pending, the computer will be recreated on the next start_computer"
                 } else {
                     "pending, it happens on start_computer after the computer is stopped (`docker stop`)"
@@ -568,11 +595,12 @@ impl Docked {
             .id
             .as_deref()
             .ok_or_else(|| anyhow!("the computer container has no ID"))?;
-        let still_stopped = match self.inspect().await? {
-            Some(now) => now.id.as_deref() == Some(id) && is_stopped(status_of(&now)),
+        let port_base = configured_port_base(old);
+        let still_exited = match self.inspect().await? {
+            Some(now) => now.id.as_deref() == Some(id) && is_exited(status_of(&now)),
             None => false,
         };
-        let removed = still_stopped && {
+        let removed = still_exited && {
             let options = RemoveContainerOptionsBuilder::new().force(false).build();
             let result = within(
                 "removing the old computer container",
@@ -588,15 +616,12 @@ impl Docked {
         };
         if !removed {
             info!(container = %name, "another process changed the computer while upgrading, using its container");
-            let now = self.inspect().await?;
-            return self
-                .apply(plan(now.as_ref().and_then(status_of), false))
-                .await;
+            return match self.inspect().await? {
+                Some(now) => self.apply(step(status_of(&now))).await,
+                None => self.create(Origin::Replacing { port_base }).await,
+            };
         }
-        self.create(Origin::Replacing {
-            port_base: configured_port_base(old),
-        })
-        .await
+        self.create(Origin::Replacing { port_base }).await
     }
 
     /// Docker reserves the name before the container can be inspected or started.
@@ -751,15 +776,36 @@ mod tests {
     #[test]
     fn plan_recreates_only_a_stopped_computer_on_an_older_image() {
         use ContainerStateStatusEnum::{CREATED, EXITED, PAUSED, RESTARTING, RUNNING};
-        assert_eq!(plan(None, false), Plan::Create);
-        assert_eq!(plan(None, true), Plan::Create);
-        assert_eq!(plan(Some(EXITED), false), Plan::Start);
-        assert_eq!(plan(Some(CREATED), false), Plan::Start);
+        assert_eq!(plan(None, true), Plan::Do(Step::Create));
+        assert_eq!(plan(Some(EXITED), false), Plan::Do(Step::Start));
         assert_eq!(plan(Some(EXITED), true), Plan::Recreate);
-        assert_eq!(plan(Some(CREATED), true), Plan::Recreate);
-        assert_eq!(plan(Some(RUNNING), true), Plan::Reuse);
-        assert_eq!(plan(Some(RESTARTING), true), Plan::Reuse);
-        assert!(matches!(plan(Some(PAUSED), true), Plan::Refuse(_)));
+        assert_eq!(plan(Some(CREATED), true), Plan::Do(Step::Start));
+        assert_eq!(plan(Some(RUNNING), true), Plan::Do(Step::Reuse));
+        assert_eq!(plan(Some(RESTARTING), true), Plan::Do(Step::Reuse));
+        assert!(matches!(
+            plan(Some(PAUSED), true),
+            Plan::Do(Step::Refuse(_))
+        ));
+    }
+
+    #[test]
+    fn only_a_container_with_our_label_and_token_counts_as_ours() {
+        let container =
+            |labels: Option<HashMap<String, String>>, env: Vec<&str>| ContainerInspectResponse {
+                config: Some(ContainerConfig {
+                    labels,
+                    env: Some(env.into_iter().map(str::to_owned).collect()),
+                    ..ContainerConfig::default()
+                }),
+                ..ContainerInspectResponse::default()
+            };
+        assert!(is_ours(&container(
+            Some(labels()),
+            vec!["COMPUTERD_TOKEN=t"]
+        )));
+        assert!(!is_ours(&container(None, vec!["COMPUTERD_TOKEN=t"])));
+        assert!(!is_ours(&container(Some(labels()), vec!["PATH=/bin"])));
+        assert!(!is_ours(&ContainerInspectResponse::default()));
     }
 
     #[test]
