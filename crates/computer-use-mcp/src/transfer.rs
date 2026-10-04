@@ -8,15 +8,15 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use computer_protocol::{SessionId, TransferReply, UploadQuery};
+use computer_protocol::{SessionId, TransferReply, UploadCheck, UploadQuery};
 use computer_transfer::{
     Platform, pack,
-    pipe::{CHANNEL_CHUNKS, CHUNK, STALL, SyncReader, SyncWriter},
-    unpack,
+    pipe::{CHANNEL_CHUNKS, CHUNK, SyncReader, SyncWriter},
+    root_name, unpack,
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::client::Client;
@@ -102,10 +102,24 @@ pub(crate) async fn to_computer(
             source.display()
         ));
     }
+    let stall = client.stall();
+    let name = root_name(&source).with_context(|| format!("cannot send {}", source.display()))?;
+    client
+        .upload_check(
+            session,
+            &UploadCheck {
+                path: computer_path.clone(),
+                overwrite,
+                name,
+                folder: meta.is_dir(),
+            },
+        )
+        .await?;
     let cancel = CancellationToken::new();
     let _stop_on_drop = cancel.clone().drop_guard();
     let (tx, rx) = mpsc::channel(CHANNEL_CHUNKS);
-    let writer = SyncWriter::new(tx, cancel.clone(), STALL);
+    let (handed_over_tx, handed_over_rx) = oneshot::channel();
+    let writer = SyncWriter::new(tx, cancel.clone(), stall);
     let packing = tokio::task::spawn_blocking(move || {
         let mut out = BufWriter::with_capacity(CHUNK, writer);
         let packed = pack(&source, &mut out, Platform::current());
@@ -115,14 +129,34 @@ pub(crate) async fn to_computer(
         }
         packed
     });
-    let body = reqwest::Body::wrap_stream(futures_util::stream::unfold(rx, |mut rx| async {
-        rx.recv().await.map(|chunk| (chunk, rx))
-    }));
+    let body = reqwest::Body::wrap_stream(futures_util::stream::unfold(
+        (rx, Some(handed_over_tx)),
+        |(mut rx, mut handed_over)| async {
+            let chunk = rx.recv().await;
+            if chunk.is_none()
+                && let Some(handed_over) = handed_over.take()
+            {
+                let _ = handed_over.send(());
+            }
+            chunk.map(|chunk| (chunk, (rx, handed_over)))
+        },
+    ));
     let query = UploadQuery {
         path: computer_path,
         overwrite,
     };
-    let sent = client.upload(session, &query, body).await;
+    let upload = client.upload(session, &query, body);
+    tokio::pin!(upload);
+    let sent = tokio::select! {
+        sent = &mut upload => sent,
+        () = async {
+            let _ = handed_over_rx.await;
+            tokio::time::sleep(stall).await;
+        } => Err(anyhow!(
+            "the computer did not answer within {} s after the last data was sent",
+            stall.as_secs_f64()
+        )),
+    };
     let failed_alone = packing.is_finished();
     cancel.cancel();
     let packed = packing.await.context("reading the files to send")?;
@@ -151,7 +185,7 @@ pub(crate) async fn from_computer(
             .bytes_stream()
             .map(|chunk| chunk.map_err(io::Error::other)),
     );
-    let reader = SyncReader::new(stream, cancel, STALL);
+    let reader = SyncReader::new(stream, cancel, client.stall());
     let done =
         tokio::task::spawn_blocking(move || unpack(reader, &dest, overwrite, Platform::current()))
             .await
@@ -225,5 +259,127 @@ mod tests {
             "{text}"
         );
         assert!(text.ends_with("... and 2 more"), "{text}");
+    }
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    use crate::computer::Endpoint;
+
+    const NO_CONTENT: &[u8] = b"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n";
+
+    /// A stand-in for `computerd` that reads an upload slowly and answers, or never answers.
+    async fn slow_computer(read_pause: Duration, slow_bytes: usize, answers: bool) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let (mut conn, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut seen = Vec::new();
+                    let mut chunk = vec![0u8; 32 * 1024];
+                    let mut is_check = None;
+                    let mut total = 0;
+                    loop {
+                        let n = conn.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        seen.extend_from_slice(&chunk[..n]);
+                        total += n;
+                        if is_check.is_none() && seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                            is_check =
+                                Some(String::from_utf8_lossy(&seen).contains("upload-check"));
+                        }
+                        match is_check {
+                            Some(true) => {
+                                let _ = conn.write_all(NO_CONTENT).await;
+                                return;
+                            }
+                            Some(false) if seen.ends_with(b"0\r\n\r\n") => break,
+                            _ => {}
+                        }
+                        let keep = seen.len().saturating_sub(8);
+                        seen.drain(..keep);
+                        if total < slow_bytes {
+                            tokio::time::sleep(read_pause).await;
+                        }
+                    }
+                    if answers {
+                        let reply = TransferReply {
+                            path: "/home/computer/x".to_owned(),
+                            files: 1,
+                            folders: 0,
+                            bytes: 1,
+                            skipped: computer_protocol::SkipList::default(),
+                        };
+                        let body = serde_json::to_string(&reply).unwrap();
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = conn.write_all(head.as_bytes()).await;
+                        let _ = conn.write_all(body.as_bytes()).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    fn client_for(port: u16, stall: Duration) -> Client {
+        let endpoint = Endpoint {
+            port,
+            token: "t".to_owned(),
+            viewer_port: None,
+        };
+        Client::new(&endpoint).unwrap().with_stall(stall)
+    }
+
+    struct Remove(PathBuf);
+
+    impl Drop for Remove {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn big_file() -> Remove {
+        let path = std::env::temp_dir().join(format!("computer-use-slow-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, vec![b'x'; 16 * 1024 * 1024]).unwrap();
+        Remove(path)
+    }
+
+    fn session() -> SessionId {
+        SessionId::parse(&"0".repeat(32)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_upload_that_takes_longer_than_the_stall_succeeds_while_data_keeps_moving() {
+        let stall = Duration::from_millis(1500);
+        let port = slow_computer(Duration::from_millis(10), 8 * 1024 * 1024, true).await;
+        let file = big_file();
+        let started = std::time::Instant::now();
+        let client = client_for(port, stall);
+        let reply = to_computer(&client, &session(), file.0.clone(), "~/x".to_owned(), false)
+            .await
+            .unwrap();
+        assert_eq!(reply.path, "/home/computer/x");
+        assert!(started.elapsed() > stall, "{:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn an_upload_fails_when_the_computer_does_not_answer_after_the_data_is_sent() {
+        let port = slow_computer(Duration::ZERO, 0, false).await;
+        let file = big_file();
+        let client = client_for(port, Duration::from_millis(200));
+        let error = to_computer(&client, &session(), file.0.clone(), "~/x".to_owned(), false)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("did not answer"), "{error}");
     }
 }

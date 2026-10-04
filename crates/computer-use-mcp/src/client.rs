@@ -6,7 +6,7 @@ use computer_protocol::{
     ListFilesReply, ListFilesRequest, Observation, OpenPathRequest, OwnerId, PROTOCOL_VERSION,
     ReadFileReply, ReadFileRequest, ScreenSize, SessionCreated, SessionId, SessionTitle,
     SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts, TransferReply,
-    UploadQuery, VERSION, ViewerInfo, WriteFileReply, WriteFileRequest,
+    UploadCheck, UploadQuery, VERSION, ViewerInfo, WriteFileReply, WriteFileRequest,
 };
 use reqwest::StatusCode;
 
@@ -56,6 +56,8 @@ pub(crate) struct Client {
     http: reqwest::Client,
     /// Has no total timeout, since a transfer takes as long as its data does. Waits for data are bounded by the read timeout.
     streaming: reqwest::Client,
+    /// How long a transfer waits for data or for the computer's answer before it fails.
+    stall: Duration,
     base: String,
     token: String,
 }
@@ -69,16 +71,25 @@ impl Client {
             .context("building the HTTP client")?;
         let streaming = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(computer_transfer::pipe::STALL)
             .no_proxy()
             .build()
             .context("building the HTTP client for transfers")?;
         Ok(Self {
             http,
             streaming,
+            stall: computer_transfer::pipe::STALL,
             base: format!("http://127.0.0.1:{}", endpoint.port),
             token: endpoint.token.clone(),
         })
+    }
+
+    pub(crate) fn stall(&self) -> Duration {
+        self.stall
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_stall(self, stall: Duration) -> Self {
+        Self { stall, ..self }
     }
 
     async fn health(&self) -> Result<Health> {
@@ -367,6 +378,28 @@ impl Client {
             .await
     }
 
+    /// Asks whether the computer can take a root named `check.name` at `check.path`, before any data is sent.
+    ///
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub(crate) async fn upload_check(
+        &self,
+        session: &SessionId,
+        check_request: &UploadCheck,
+    ) -> Result<()> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/sessions/{session}/files/upload-check",
+                self.base
+            ))
+            .bearer_auth(&self.token)
+            .json(check_request)
+            .send()
+            .await
+            .context("asking the computer about the destination")?;
+        check(response).await.map(|_| ())
+    }
+
     /// Sends a tar archive for the computer to unpack at `path`.
     ///
     /// Fails with [`UnknownSession`] when `computerd` does not know the session.
@@ -396,13 +429,20 @@ impl Client {
         session: &SessionId,
         path: String,
     ) -> Result<reqwest::Response> {
-        let response = self
+        let sending = self
             .streaming
             .post(format!("{}/sessions/{session}/files/download", self.base))
             .bearer_auth(&self.token)
             .json(&DownloadRequest { path })
-            .send()
+            .send();
+        let response = tokio::time::timeout(self.stall, sending)
             .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "the computer did not start sending within {} s",
+                    self.stall.as_secs_f64()
+                )
+            })?
             .context("asking the computer for the files")?;
         check(response).await
     }

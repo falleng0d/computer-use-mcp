@@ -5,14 +5,14 @@
 
 mod pack;
 pub mod pipe;
-pub mod rules;
+mod rules;
 mod unpack;
 
 use std::fmt;
 
-pub use pack::{Packed, pack};
+pub use pack::{Packed, pack, root_name};
 pub use rules::Platform;
-pub use unpack::{Unpacked, unpack};
+pub use unpack::{Unpacked, check_destination, unpack};
 
 /// What a transfer did before it stopped.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

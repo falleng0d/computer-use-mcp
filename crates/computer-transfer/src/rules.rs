@@ -9,6 +9,8 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     Unix,
+    /// A Unix system whose default file system ignores case.
+    Mac,
     Windows,
 }
 
@@ -17,9 +19,17 @@ impl Platform {
     pub const fn current() -> Self {
         if cfg!(windows) {
             Self::Windows
+        } else if cfg!(target_os = "macos") {
+            Self::Mac
         } else {
             Self::Unix
         }
+    }
+
+    /// Whether `A.txt` and `a.txt` are the same file here.
+    #[must_use]
+    pub const fn ignores_case(self) -> bool {
+        !matches!(self, Self::Unix)
     }
 }
 
@@ -169,7 +179,7 @@ pub fn name_problem(name: &str, platform: Platform) -> Option<String> {
     if name.contains('\0') {
         return Some("the name contains a null character".to_owned());
     }
-    if platform == Platform::Unix {
+    if platform != Platform::Windows {
         return None;
     }
     if let Some(bad) = name
@@ -294,6 +304,13 @@ mod tests {
         assert_eq!(count("a/../../b"), Err(PathProblem::ParentDir));
         assert_eq!(count(".."), Err(PathProblem::ParentDir));
         assert_eq!(count("."), Err(PathProblem::Empty));
+    }
+
+    #[test]
+    fn only_unix_distinguishes_names_by_case() {
+        assert!(!Platform::Unix.ignores_case());
+        assert!(Platform::Mac.ignores_case() && Platform::Windows.ignores_case());
+        assert!(name_problem("a:b", Platform::Mac).is_none());
     }
 
     #[test]

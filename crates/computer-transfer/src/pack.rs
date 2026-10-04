@@ -109,13 +109,11 @@ impl<W: Write> Packer<W> {
     }
 
     fn finish(&mut self) -> io::Result<()> {
-        if !self.skipped.is_empty() {
-            let json = serde_json::to_vec(&self.skipped).map_err(io::Error::other)?;
-            let mut header = header(EntryType::Regular, 0o644, 0);
-            header.set_size(json.len() as u64);
-            self.builder
-                .append_data(&mut header, SKIP_REPORT_ENTRY, json.as_slice())?;
-        }
+        let json = serde_json::to_vec(&self.skipped).map_err(io::Error::other)?;
+        let mut header = header(EntryType::Regular, 0o644, 0);
+        header.set_size(json.len() as u64);
+        self.builder
+            .append_data(&mut header, SKIP_REPORT_ENTRY, json.as_slice())?;
         self.builder.finish()?;
         self.builder.get_mut().flush()
     }
@@ -231,7 +229,11 @@ fn has_prefix(path: &Path) -> bool {
 }
 
 /// The name the root is sent under: the last part of the path as given, else of its real path.
-fn root_name(source: &Path) -> io::Result<String> {
+///
+/// # Errors
+///
+/// Fails when the path has no name or the name is not valid UTF-8.
+pub fn root_name(source: &Path) -> io::Result<String> {
     let given: Option<PathBuf> = source.file_name().map(PathBuf::from);
     let name = match given {
         Some(name) => name,

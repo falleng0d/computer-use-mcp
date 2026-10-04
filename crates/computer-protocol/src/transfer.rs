@@ -16,6 +16,18 @@ pub struct UploadQuery {
     pub overwrite: bool,
 }
 
+/// Body of `POST /sessions/{id}/files/upload-check`, sent before the data so a refusal arrives at once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadCheck {
+    pub path: String,
+    #[serde(default)]
+    pub overwrite: bool,
+    /// Name the root will have in the archive.
+    pub name: String,
+    /// Whether the root is a folder, not a file.
+    pub folder: bool,
+}
+
 /// Body of `POST /sessions/{id}/files/download`. The reply body is a tar archive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DownloadRequest {

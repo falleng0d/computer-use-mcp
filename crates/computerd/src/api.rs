@@ -16,8 +16,8 @@ use computer_protocol::{
     ActReply, ActRequest, ApiError, CreateSession, DownloadRequest, Health, LaunchAppRequest,
     ListFilesReply, ListFilesRequest, Observation, OpenPathRequest, OwnerId, PROTOCOL_VERSION,
     ReadFileReply, ReadFileRequest, SCREEN_COUNT, SessionCreated, SessionId, SetCwdReply,
-    SetCwdRequest, ShellReply, ShellRequest, TransferReply, UploadQuery, VERSION, ViewerInfo,
-    WriteFileReply, WriteFileRequest,
+    SetCwdRequest, ShellReply, ShellRequest, TransferReply, UploadCheck, UploadQuery, VERSION,
+    ViewerInfo, WriteFileReply, WriteFileRequest,
 };
 use tracing::error;
 use uuid::Uuid;
@@ -65,6 +65,7 @@ pub(crate) fn router(token: String, key: String, sessions: Sessions) -> Router {
             "/sessions/{id}/files/upload",
             post(upload).layer(DefaultBodyLimit::disable()),
         )
+        .route("/sessions/{id}/files/upload-check", post(upload_check))
         .route("/sessions/{id}/files/download", post(download))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state)
@@ -223,6 +224,15 @@ async fn upload(
     body: Body,
 ) -> Result<Json<TransferReply>, SessionError> {
     state.sessions.upload(&id, query, body).await.map(Json)
+}
+
+async fn upload_check(
+    State(state): State<AppState>,
+    Path(id): Path<SessionId>,
+    Json(request): Json<UploadCheck>,
+) -> Result<StatusCode, SessionError> {
+    state.sessions.upload_check(&id, request).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn download(

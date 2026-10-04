@@ -1,6 +1,7 @@
 //! Writes a tar stream made by `pack` to disk.
 
 use std::{
+    collections::{HashMap, hash_map::Entry},
     fs,
     io::{self, BufWriter, Read},
     path::{Path, PathBuf},
@@ -8,7 +9,7 @@ use std::{
 };
 
 use computer_protocol::{SKIP_REPORT_ENTRY, SkipList};
-use tar::{Archive, Entry, EntryType};
+use tar::{Archive, EntryType};
 use uuid::Uuid;
 
 use crate::{
@@ -100,6 +101,28 @@ fn followed_kind(path: &Path) -> Option<Kind> {
     })
 }
 
+/// Tells before any data is sent whether a root named `name` can land at `dest`.
+///
+/// Applies the same rules as [`unpack`] does with the first entry, and returns the final path.
+///
+/// # Errors
+///
+/// Refuses with a message naming the path that is in the way, or the name that cannot exist here.
+pub fn check_destination(
+    dest: &Path,
+    name: &str,
+    folder: bool,
+    overwrite: bool,
+    platform: Platform,
+) -> Result<PathBuf, String> {
+    if let Some(problem) = rules::name_problem(name, platform) {
+        return Err(format!("{name} cannot be created here: {problem}"));
+    }
+    let wanted = if folder { Wanted::Folder } else { Wanted::File };
+    rules::destination(dest, followed_kind(dest), name, wanted, overwrite, kind_at)
+        .map(|found| found.path)
+}
+
 /// Writes the archive read from `reader` to `dest`, following the destination rule of `cp -r`.
 ///
 /// The root entry decides everything before anything is written: the final path, the refusal
@@ -131,6 +154,8 @@ pub fn unpack<R: Read>(
         sender_skipped: SkipList::default(),
         skipped_dirs: Vec::new(),
         checked_parent: None,
+        saw_end: false,
+        written: HashMap::new(),
     };
     match unpacker.run(reader, dest) {
         Ok(()) => {
@@ -163,6 +188,10 @@ struct Unpacker {
     skipped_dirs: Vec<PathBuf>,
     /// Folder whose path was last checked for links, which most next entries share.
     checked_parent: Option<PathBuf>,
+    /// Whether the sender's closing report entry arrived.
+    saw_end: bool,
+    /// On systems that ignore case, the lowercased path of every entry written, with the name it had.
+    written: HashMap<String, String>,
 }
 
 fn read_error(error: &io::Error) -> String {
@@ -210,10 +239,15 @@ impl Unpacker {
             let mut entry = entry.map_err(|e| read_error(&e))?;
             self.entry(&mut entry, &name, wanted)?;
         }
+        if !self.saw_end {
+            return Err(
+                "the transfer ended before the sender finished, so files may be missing".to_owned(),
+            );
+        }
         Ok(())
     }
 
-    fn root_name<R: Read>(&self, entry: &Entry<'_, R>) -> Result<String, String> {
+    fn root_name<R: Read>(&self, entry: &tar::Entry<'_, R>) -> Result<String, String> {
         let path = entry.path().map_err(|e| read_error(&e))?;
         let names = rules::inside(&path).map_err(|_| "the transfer starts with a bad path")?;
         let [name] = names.as_slice() else {
@@ -230,7 +264,7 @@ impl Unpacker {
 
     fn entry<R: Read>(
         &mut self,
-        entry: &mut Entry<'_, R>,
+        entry: &mut tar::Entry<'_, R>,
         root_name: &str,
         root: Wanted,
     ) -> Result<(), String> {
@@ -279,6 +313,18 @@ impl Unpacker {
             self.skipped.push(rel.display().to_string(), problem);
             return Ok(());
         }
+        if let Some(first) = self.case_clash(&rel) {
+            if kind == EntryType::Directory {
+                self.skipped_dirs.push(rel.clone());
+            }
+            self.skipped.push(
+                rel.display().to_string(),
+                format!(
+                    "it differs only by case from {first}, and this system treats them as one name"
+                ),
+            );
+            return Ok(());
+        }
         let target = self.prepare_parent(&rel)?;
         match kind {
             EntryType::Directory => {
@@ -302,7 +348,7 @@ impl Unpacker {
         }
     }
 
-    fn read_report<R: Read>(&mut self, entry: &mut Entry<'_, R>) -> Result<(), String> {
+    fn read_report<R: Read>(&mut self, entry: &mut tar::Entry<'_, R>) -> Result<(), String> {
         let mut json = Vec::new();
         entry
             .take(MAX_REPORT_BYTES)
@@ -311,7 +357,24 @@ impl Unpacker {
         if let Ok(list) = serde_json::from_slice::<SkipList>(&json) {
             self.sender_skipped = list;
         }
+        self.saw_end = true;
         Ok(())
+    }
+
+    /// The earlier entry that `rel` collides with on a system that ignores case, remembering `rel` otherwise.
+    fn case_clash(&mut self, rel: &Path) -> Option<String> {
+        if !self.platform.ignores_case() {
+            return None;
+        }
+        let shown = rel.display().to_string();
+        match self.written.entry(shown.to_lowercase()) {
+            Entry::Occupied(known) if *known.get() != shown => Some(known.get().clone()),
+            Entry::Occupied(_) => None,
+            Entry::Vacant(slot) => {
+                slot.insert(shown);
+                None
+            }
+        }
     }
 
     fn name_problem(&self, rel: &Path) -> Option<String> {
@@ -375,7 +438,7 @@ impl Unpacker {
 
     fn write_file<R: Read>(
         &mut self,
-        entry: &mut Entry<'_, R>,
+        entry: &mut tar::Entry<'_, R>,
         target: &Path,
     ) -> Result<(), String> {
         rules::check_existing(target, kind_at(target), Wanted::File, self.overwrite)?;
@@ -420,7 +483,7 @@ impl Unpacker {
 
     fn write_link<R: Read>(
         &mut self,
-        entry: &Entry<'_, R>,
+        entry: &tar::Entry<'_, R>,
         rel: &Path,
         target: &Path,
     ) -> Result<(), String> {
@@ -531,6 +594,15 @@ mod tests {
             header.set_size(data.len() as u64);
             header.set_cksum();
             builder.append(&header, *data).unwrap();
+        }
+        if !entries.iter().any(|(path, ..)| *path == SKIP_REPORT_ENTRY) {
+            let empty = serde_json::to_vec(&SkipList::default()).unwrap();
+            let mut header = Header::new_gnu();
+            header.as_old_mut().name[..SKIP_REPORT_ENTRY.len()]
+                .copy_from_slice(SKIP_REPORT_ENTRY.as_bytes());
+            header.set_size(empty.len() as u64);
+            header.set_cksum();
+            builder.append(&header, empty.as_slice()).unwrap();
         }
         builder.into_inner().unwrap()
     }
@@ -811,5 +883,74 @@ mod tests {
             .map(|s| s.path.as_str())
             .collect();
         assert_eq!(skipped, ["a:b", "tree/pipe"]);
+    }
+
+    #[test]
+    fn a_stream_cut_exactly_between_entries_is_not_a_finished_transfer() {
+        let base = Dir::new();
+        let archive = packed(&source_tree(&base));
+        let report_and_end = 512 + 512 + 1024;
+        let cut = &archive[..archive.len() - report_and_end];
+        let out = Dir::new();
+
+        let error = put(&out.0, cut, false).unwrap_err();
+        assert!(error.message.contains("ended before"), "{error}");
+        assert_eq!(
+            error.progress.files, 2,
+            "everything before the cut was written"
+        );
+        assert!(put(&out.join("again"), &archive, false).is_ok());
+    }
+
+    #[test]
+    fn names_that_differ_only_by_case_are_skipped_where_case_is_ignored() {
+        let archive = raw_archive(&[
+            ("tree/", EntryType::Directory, b"", None),
+            ("tree/A.txt", EntryType::Regular, b"first", None),
+            ("tree/a.txt", EntryType::Regular, b"second", None),
+            ("tree/Dir/", EntryType::Directory, b"", None),
+            ("tree/dir/", EntryType::Directory, b"", None),
+            ("tree/dir/inner", EntryType::Regular, b"x", None),
+        ]);
+        let out = Dir::new();
+        let done = unpack(Cursor::new(archive), &out.0, true, Platform::Windows).unwrap();
+        assert_eq!(files_under(&out.0), ["tree", "tree/A.txt", "tree/Dir"]);
+        assert_eq!(fs::read_to_string(out.join("tree/A.txt")).unwrap(), "first");
+        let skipped: Vec<_> = done
+            .skipped
+            .entries
+            .iter()
+            .map(|s| {
+                (
+                    s.path.as_str(),
+                    s.reason.contains("differs only by case from"),
+                )
+            })
+            .collect();
+        assert_eq!(skipped, [("a.txt", true), ("dir", true)]);
+    }
+
+    #[test]
+    fn check_destination_applies_the_root_rules_before_any_data_moves() {
+        let out = Dir::new();
+        fs::create_dir(out.join("taken")).unwrap();
+        fs::write(out.join("file"), "x").unwrap();
+        let check = |dest: &str, name: &str, folder, overwrite| {
+            check_destination(&out.join(dest), name, folder, overwrite, Platform::Unix)
+        };
+        assert_eq!(
+            check(".", "new", true, false),
+            Ok(out.join(".").join("new"))
+        );
+        let error = check(".", "taken", true, false).unwrap_err();
+        assert!(error.contains("already exists"), "{error}");
+        assert!(check(".", "taken", true, true).is_ok());
+        assert!(
+            check("file", "x", true, true)
+                .unwrap_err()
+                .contains("not a folder")
+        );
+        let windows = check_destination(&out.0, "a:b", false, false, Platform::Windows);
+        assert!(windows.unwrap_err().contains("cannot be created"));
     }
 }

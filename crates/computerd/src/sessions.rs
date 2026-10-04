@@ -13,7 +13,8 @@ use computer_protocol::{
     ActReply, ActRequest, CreateSession, DEFAULT_PORT_BASE, DownloadRequest, LaunchAppRequest,
     ListFilesReply, ListFilesRequest, Observation, OpenPathRequest, OwnerId, ReadFileReply,
     ReadFileRequest, ScreenSize, SessionId, SessionTitle, SetCwdReply, SetCwdRequest, ShellReply,
-    ShellRequest, ShellTimeouts, TransferReply, UploadQuery, WriteFileReply, WriteFileRequest,
+    ShellRequest, ShellTimeouts, TransferReply, UploadCheck, UploadQuery, WriteFileReply,
+    WriteFileRequest,
 };
 use serde::Serialize;
 use tokio::{task::JoinHandle, time::Instant};
@@ -662,6 +663,33 @@ impl Sessions {
         let cwd = lock(&active.session.cwd).clone();
         let dest = workdir::resolve(&cwd, &self.home, &query.path);
         transfer::upload(dest, query.overwrite, body, active.session.cancel.clone()).await
+    }
+
+    /// Refuses a transfer that cannot land, before any data is sent.
+    pub(crate) async fn upload_check(
+        &self,
+        id: &SessionId,
+        request: UploadCheck,
+    ) -> Result<(), SessionError> {
+        let active = self.begin(id)?;
+        if request.path.trim().is_empty() {
+            return Err(SessionError::Rejected(
+                "computer_path must not be empty".to_owned(),
+            ));
+        }
+        let cwd = lock(&active.session.cwd).clone();
+        let dest = workdir::resolve(&cwd, &self.home, &request.path);
+        blocking(move || {
+            computer_transfer::check_destination(
+                &dest,
+                &request.name,
+                request.folder,
+                request.overwrite,
+                computer_transfer::Platform::current(),
+            )
+            .map(|_| ())
+        })
+        .await
     }
 
     /// Packs a file or folder of the computer as a tar archive. A relative path starts at the session's working folder.

@@ -27,7 +27,7 @@ pub use shell::{
 };
 pub use transfer::{
     DownloadRequest, MAX_LISTED_SKIPS, SKIP_REPORT_ENTRY, SkipList, Skipped, TransferReply,
-    UploadQuery,
+    UploadCheck, UploadQuery,
 };
 
 /// Version of the wire format between the host and `computerd`.
