@@ -10,6 +10,7 @@ pub mod act;
 mod desktop;
 mod files;
 mod shell;
+mod transfer;
 
 pub use act::{
     ActReply, ActRequest, Action, ActionError, Button, Direction, Kind, Point, RawAction,
@@ -24,9 +25,13 @@ pub use shell::{
     SetCwdReply, SetCwdRequest, ShellOutcome, ShellReply, ShellRequest, ShellTimeouts,
     ShellTimeoutsError,
 };
+pub use transfer::{
+    DownloadRequest, MAX_LISTED_SKIPS, SKIP_REPORT_ENTRY, SkipList, Skipped, TransferReply,
+    UploadCheck, UploadQuery,
+};
 
 /// Version of the wire format between the host and `computerd`.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 pub const RELEASE_VERSION: Option<&str> = match option_env!("COMPUTER_USE_MCP_VERSION") {
     Some(version) if !version.is_empty() => Some(version),

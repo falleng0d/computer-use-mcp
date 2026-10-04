@@ -1,5 +1,6 @@
 mod client;
 mod computer;
+mod devtools;
 mod docker_host;
 mod file_result;
 mod image;
@@ -8,6 +9,7 @@ mod open;
 mod server;
 mod settings;
 mod shell_result;
+mod transfer;
 mod upgrade;
 
 use anyhow::Context;

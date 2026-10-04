@@ -10,8 +10,8 @@ use computer_protocol::{
     ScreenSize, SessionId, SessionTitle, ShellRequest, ShellTimeouts, WriteFileRequest,
 };
 use rmcp::{
-    handler::server::wrapper::Parameters, model::CallToolResult, schemars, tool, tool_handler,
-    tool_router,
+    RoleServer, handler::server::wrapper::Parameters, model::CallToolResult, schemars,
+    service::RequestContext, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 use tokio::{
@@ -24,11 +24,11 @@ use uuid::Uuid;
 use crate::{
     client::{Client, UnknownSession},
     computer::{Docked, Endpoint, Settings},
-    file_result,
+    devtools, file_result,
     image::{self, Image},
     observation,
     open::{self, Opener},
-    settings, shell_result,
+    settings, shell_result, transfer,
 };
 
 const SESSION_UNAVAILABLE: &str = "the computer is not running or this session id is not valid, call start_computer to get a new session";
@@ -230,12 +230,27 @@ struct WriteFileArgs {
     content: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct FileTransferArgs {
+    /// Session id returned by `start_computer`.
+    session: String,
+    /// `to_computer` copies from the host to the computer. `from_computer` copies from the computer to the host.
+    direction: transfer::Direction,
+    /// Path on the host, the machine the user works on. Absolute, `~` for the host user's home folder (for example `~/Downloads`), or relative to the MCP server's working folder.
+    host_path: String,
+    /// Path on the computer. A relative path starts at your working folder, `~` is `/home/computer`.
+    computer_path: String,
+    /// Replace files that already exist. Default false, which refuses when the destination exists. A folder merges into an existing folder, replacing same-named files and keeping the rest.
+    overwrite: Option<bool>,
+}
+
 #[derive(Clone)]
 pub(crate) struct Server {
     settings: Settings,
     screen_size: Result<ScreenSize, String>,
     shell_timeouts: Result<ShellTimeouts, String>,
     idle: Result<NonZeroU32, String>,
+    devtools_idle: Result<NonZeroU32, String>,
     open_mode: Result<open::Mode, String>,
     opener: Arc<Opener>,
     heartbeats: Arc<Heartbeats>,
@@ -271,6 +286,7 @@ impl Server {
             settings::screen_size(),
             settings::shell_timeouts(),
             settings::idle(),
+            settings::devtools_idle(),
             settings::open_mode(),
         )
     }
@@ -281,6 +297,7 @@ impl Server {
         screen_size: Result<ScreenSize, String>,
         shell_timeouts: Result<ShellTimeouts, String>,
         idle: Result<NonZeroU32, String>,
+        devtools_idle: Result<NonZeroU32, String>,
         open_mode: Result<open::Mode, String>,
     ) -> Self {
         let opener = Arc::new(Opener::new(open_mode.clone().unwrap_or_default()));
@@ -289,6 +306,7 @@ impl Server {
             screen_size,
             shell_timeouts,
             idle,
+            devtools_idle,
             open_mode,
             opener,
             heartbeats: Arc::new(Heartbeats::new()),
@@ -493,8 +511,108 @@ impl Server {
         }
     }
 
+    async fn files_transfer(&self, args: FileTransferArgs) -> anyhow::Result<String> {
+        let cwd =
+            std::env::current_dir().context("finding the working folder of the MCP server")?;
+        let host = transfer::host_path(&args.host_path, std::env::home_dir().as_deref(), &cwd)
+            .map_err(|message| anyhow::anyhow!(message))?;
+        let (session, client) = self.client_for(&args.session).await?;
+        let overwrite = args.overwrite.unwrap_or(false);
+        let started = std::time::Instant::now();
+        let copied = match args.direction {
+            transfer::Direction::ToComputer => {
+                transfer::to_computer(&client, &session, host, args.computer_path, overwrite).await
+            }
+            transfer::Direction::FromComputer => {
+                transfer::from_computer(&client, &session, args.computer_path, host, overwrite)
+                    .await
+            }
+        };
+        match copied {
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
+            other => other.map(|reply| transfer::describe(&reply, started.elapsed())),
+        }
+    }
+
+    /// Runs one of the fixed developer tools commands in the session's shell.
+    async fn run_devtools_command(
+        &self,
+        session: &SessionId,
+        client: &Client,
+        command: String,
+        timeout_secs: u64,
+    ) -> anyhow::Result<computer_protocol::ShellReply> {
+        let request = ShellRequest {
+            command,
+            timeout_secs: Some(timeout_secs),
+        };
+        client
+            .shell(session, &request, self.shell_timeouts()?)
+            .await
+    }
+
+    async fn start_devtools(&self, session: &str) -> anyhow::Result<String> {
+        let idle = self
+            .devtools_idle
+            .clone()
+            .map_err(|message| anyhow::anyhow!(message))?;
+        let (session, endpoint) = self.endpoint_for(session).await?;
+        let client = Client::new(&endpoint)?;
+        let start = || {
+            self.run_devtools_command(
+                &session,
+                &client,
+                devtools::start_command(idle),
+                devtools::COMMAND_TIMEOUT_SECS,
+            )
+        };
+        let mut reply = start().await;
+        if reply.as_ref().is_ok_and(devtools::needs_browser) {
+            match client
+                .launch_app(&session, "browser".to_owned(), None)
+                .await
+            {
+                Err(error) if error.is::<UnknownSession>() => return Err(gone(error)),
+                Err(error) => return Err(error.context("starting the screen's Chromium")),
+                Ok(observation) => self.announce(&endpoint, observation.opened_screen),
+            }
+            reply = start().await;
+        }
+        match reply {
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
+            other => devtools::started(&other?),
+        }
+    }
+
+    async fn stop_devtools(&self, session: &str) -> anyhow::Result<String> {
+        let (session, client) = self.client_for(session).await?;
+        let reply = self
+            .run_devtools_command(
+                &session,
+                &client,
+                devtools::STOP_COMMAND.to_owned(),
+                devtools::COMMAND_TIMEOUT_SECS,
+            )
+            .await;
+        match reply {
+            Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
+            other => devtools::stopped(&other?),
+        }
+    }
+
     async fn end(&self, session: &str) -> anyhow::Result<()> {
         let (session, client) = self.client_for(session).await?;
+        if let Err(error) = self
+            .run_devtools_command(
+                &session,
+                &client,
+                devtools::STOP_COMMAND.to_owned(),
+                devtools::CLEANUP_TIMEOUT_SECS,
+            )
+            .await
+        {
+            warn!(error = %error, "could not stop Chrome DevTools before ending the session");
+        }
         match client.end_session(&session).await {
             Err(error) if error.is::<UnknownSession>() => Err(gone(error)),
             other => other,
@@ -597,6 +715,28 @@ impl Server {
     }
 
     #[tool(
+        description = "Start Chrome DevTools for your screen's Chromium, so you can inspect and drive its pages with DOM snapshots, console and network logs, script evaluation, and screenshots. Starts the screen's Chromium if needed. Returns how to call the DevTools tools with the shell tool. It uses a few hundred MB while running and stops by itself when unused, call stop_chrome_devtools when you are done."
+    )]
+    async fn start_chrome_devtools(
+        &self,
+        Parameters(args): Parameters<EndSessionArgs>,
+    ) -> Result<String, String> {
+        let result = self.start_devtools(&args.session).await;
+        report("start_chrome_devtools", result)
+    }
+
+    #[tool(
+        description = "Stop Chrome DevTools for your screen and free its memory. The page stays open in Chromium. Replies that it stopped or was not running."
+    )]
+    async fn stop_chrome_devtools(
+        &self,
+        Parameters(args): Parameters<EndSessionArgs>,
+    ) -> Result<String, String> {
+        let result = self.stop_devtools(&args.session).await;
+        report("stop_chrome_devtools", result)
+    }
+
+    #[tool(
         description = "Set the working folder of your session. Your shell commands start there, and relative paths in file tools resolve from it. A relative path starts at the current working folder, `~` is home, and the folder must exist. Starts at home. Returns the new absolute path."
     )]
     async fn set_cwd(&self, Parameters(args): Parameters<SetCwdArgs>) -> Result<String, String> {
@@ -616,7 +756,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Read a file on the computer. UTF-8 text comes back as text. PNG and JPEG files come back as images (up to 1 MB), so you can look at screenshots and pictures. Other binary files are refused, inspect them with the shell tool. Relative paths start at your working folder, `~` is home. Long text keeps its start and end with a marker in between and a note on how to read the rest. Use offset and limit, counted in lines from 1, to read a range."
+        description = "Read a file on the computer. UTF-8 text comes back as text. PNG and JPEG files come back as images (up to 1 MB), so you can look at screenshots and pictures. Other binary files are refused, inspect them with the shell tool or copy them to the host with file_transfer. Relative paths start at your working folder, `~` is home. Long text keeps its start and end with a marker in between and a note on how to read the rest. Use offset and limit, counted in lines from 1, to read a range."
     )]
     async fn read_file(
         &self,
@@ -627,7 +767,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Write a UTF-8 text file on the computer as the user `computer`, replacing the file if it exists. Missing folders are created. The write is atomic, so nobody reads half a file, an existing file keeps its permissions, and a read-only file is refused with permission denied. Relative paths start at your working folder, `~` is home. Content is limited to 10 MB. Returns the absolute path and the bytes written. All sessions see the same files."
+        description = "Write a UTF-8 text file on the computer as the user `computer`, replacing the file if it exists. Missing folders are created. The write is atomic, so nobody reads half a file, an existing file keeps its permissions, and a read-only file is refused with permission denied. Relative paths start at your working folder, `~` is home. Content is limited to 10 MB, use file_transfer for binary or larger files. Returns the absolute path and the bytes written. All sessions see the same files."
     )]
     async fn write_file(
         &self,
@@ -635,6 +775,21 @@ impl Server {
     ) -> Result<String, String> {
         let result = self.files_write(args).await;
         report("write_file", result)
+    }
+
+    #[tool(
+        description = "Copy a file or a whole folder between the host (the machine the user works on) and the computer, in either direction. Use it to put something you made on the computer into the user's `~/Downloads`, or to bring a host file or folder onto the computer to work on. `direction` is `to_computer` or `from_computer`. `host_path` is absolute, `~` for the host user's home folder, or relative to the MCP server's working folder. `computer_path` is a path on the computer (relative paths start at your working folder, `~` is /home/computer). Works for any file, binary or text, with no size limit, and folders keep their contents, empty folders, executable bits and symlinks. The destination rule is the one of `cp -r`. When the destination is an existing folder, the source goes inside it under its own name, so a `report.pdf` sent to `~/Downloads` becomes `~/Downloads/report.pdf`. Otherwise the destination is the new name, and missing parent folders are created. By default the call refuses when the final path already exists, and says which path. With `overwrite` true it replaces files, and a folder merges, replacing same-named files and keeping the others. A file never replaces a folder or the other way round. With overwrite, a conflict found partway through a folder stops the copy. Files already copied stay, and the error says how far it got. Names the host cannot hold (on Windows, reserved names and characters such as `:` and `?`) and special files are skipped, and the reply lists them. The reply gives the final destination path, files, folders, bytes, and the time taken. Large transfers keep running while data moves, and fail when nothing moves for 60 seconds. Use this instead of write_file or read_file for binary or large data."
+    )]
+    async fn file_transfer(
+        &self,
+        Parameters(args): Parameters<FileTransferArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<String, String> {
+        let result = tokio::select! {
+            result = self.files_transfer(args) => result,
+            () = context.ct.cancelled() => Err(anyhow::anyhow!("the transfer was cancelled")),
+        };
+        report("file_transfer", result)
     }
 }
 
@@ -663,7 +818,7 @@ mod tests {
         Cleanup, Tags, docker_cli, rfb_authenticate, rfb_connect, rfb_size, viewers_on_page,
     };
     use super::*;
-    use crate::settings::parse_idle;
+    use crate::settings::{parse_devtools_idle, parse_idle};
 
     #[tokio::test]
     #[ignore = "needs Docker"]
@@ -686,6 +841,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
 
@@ -727,6 +883,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
 
@@ -764,6 +921,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
         (server, cleanup)
@@ -853,6 +1011,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
 
@@ -902,6 +1061,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
         let two = Server::new(
@@ -910,6 +1070,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
 
@@ -957,6 +1118,7 @@ mod tests {
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
         let session = server.start("actor").await.unwrap().session;
@@ -1224,6 +1386,7 @@ sleep 1";
             Ok(ScreenSize::default()),
             Ok(timeouts),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
         let session = server.start("shell user").await.unwrap().session;
@@ -1319,6 +1482,7 @@ none
             Ok(ScreenSize::default()),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
         let writer = server.start("writer").await.unwrap().session;
@@ -1419,6 +1583,7 @@ none
             Ok(size),
             Ok(ShellTimeouts::default()),
             parse_idle(None),
+            parse_devtools_idle(None),
             Ok(open::Mode::None),
         );
 
@@ -1534,6 +1699,7 @@ USER computer
                 Ok(ScreenSize::default()),
                 Ok(ShellTimeouts::default()),
                 parse_idle(None),
+                parse_devtools_idle(None),
                 Ok(open::Mode::None),
             )
         };
@@ -1586,5 +1752,216 @@ USER computer
             upgraded_id,
             "an older image never replaces a newer one"
         );
+    }
+
+    struct HostDir(std::path::PathBuf);
+
+    impl HostDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("computer-use-xfer-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(std::fs::canonicalize(path).unwrap())
+        }
+    }
+
+    impl Drop for HostDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs Docker"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario on one computer, so the container starts once"
+    )]
+    async fn file_transfer_round_trips_a_folder_and_keeps_existing_files_unless_told_to_overwrite()
+    {
+        let name = format!("computer-use-test-{}", Uuid::new_v4().simple());
+        let settings = Settings {
+            name: name.clone(),
+            timezone: None,
+            port_base: Ok(crate::computer::free_port_base()),
+        };
+        let docker = crate::docker_host::connect().unwrap();
+        let _cleanup = Cleanup {
+            docker,
+            name,
+            volume: settings.volume(),
+        };
+        let server = Server::new(
+            settings,
+            image::from_env(),
+            Ok(ScreenSize::default()),
+            Ok(ShellTimeouts::default()),
+            parse_idle(None),
+            parse_devtools_idle(None),
+            Ok(open::Mode::None),
+        );
+        let session = server.start("file transfer").await.unwrap().session;
+        let transfer =
+            |direction: &str, host: &std::path::Path, computer: &str, overwrite: bool| {
+                let args: FileTransferArgs = serde_json::from_value(serde_json::json!({
+                    "session": session.as_str(),
+                    "direction": direction,
+                    "host_path": host.to_str().unwrap(),
+                    "computer_path": computer,
+                    "overwrite": overwrite,
+                }))
+                .unwrap();
+                server.files_transfer(args)
+            };
+        let shell = |command: &'static str| {
+            let args = shell_args(&session, command, None);
+            async { server.run_shell(args).await.map(|result| text_of(&result)) }
+        };
+
+        let host = HostDir::new();
+        let source = host.0.join("xfer");
+        std::fs::create_dir_all(source.join("empty")).unwrap();
+        std::fs::create_dir_all(source.join("sub")).unwrap();
+        let binary: Vec<u8> = (0..=255u8).cycle().take(1_000_003).collect();
+        std::fs::write(source.join("data.bin"), &binary).unwrap();
+        std::fs::write(source.join("sub/note.txt"), "héllo\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(source.join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
+            std::fs::set_permissions(
+                source.join("run.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink("data.bin", source.join("link")).unwrap();
+        }
+
+        let reply = transfer("to_computer", &source, "~/xfer", false)
+            .await
+            .unwrap();
+        assert!(
+            reply.starts_with("copied to /home/computer/xfer\n"),
+            "{reply}"
+        );
+        let listing = shell("cd ~/xfer && sha256sum data.bin && cat sub/note.txt && ls -d empty && stat -c '%U %a' data.bin")
+            .await
+            .unwrap();
+        let expected = {
+            use std::fmt::Write as _;
+            let digest = sha256_hex(&binary);
+            let mut text = String::new();
+            let _ = write!(text, "{digest}  data.bin\nhéllo\nempty\ncomputer 644\n");
+            text
+        };
+        assert!(listing.contains(&expected), "{listing}");
+
+        shell("cd ~/xfer && printf '#!/bin/sh\\n' > tool.sh && chmod 750 tool.sh && ln -s sub/note.txt notelink && mkfifo pipe")
+            .await
+            .unwrap();
+        let again = transfer("to_computer", &source, "~", false)
+            .await
+            .unwrap_err();
+        assert!(
+            again.to_string().contains("/home/computer/xfer")
+                && again.to_string().contains("overwrite"),
+            "{again}"
+        );
+        let merged = transfer("to_computer", &source, "~", true).await.unwrap();
+        assert!(merged.contains("copied to /home/computer/xfer"), "{merged}");
+        let kept = shell("ls ~/xfer && find ~/xfer -name '.computer-use-transfer-*'")
+            .await
+            .unwrap();
+        assert!(
+            kept.contains("tool.sh") && kept.contains("notelink"),
+            "{kept}"
+        );
+        assert!(!kept.contains("computer-use-transfer"), "{kept}");
+
+        let file_over_folder =
+            transfer("to_computer", &source.join("data.bin"), "~/xfer/sub", true)
+                .await
+                .unwrap();
+        assert!(
+            file_over_folder.contains("/home/computer/xfer/sub/data.bin"),
+            "{file_over_folder}"
+        );
+        let folder_over_file = transfer("to_computer", &source, "~/xfer/data.bin", true)
+            .await
+            .unwrap_err();
+        assert!(
+            folder_over_file.to_string().contains("not a folder"),
+            "{folder_over_file}"
+        );
+
+        let back = host.0.join("back");
+        std::fs::create_dir(&back).unwrap();
+        let reply = transfer("from_computer", &back, "~/xfer", false)
+            .await
+            .unwrap();
+        let landed = back.join("xfer");
+        assert!(
+            reply.starts_with(&format!("copied to {}", landed.display())),
+            "{reply}"
+        );
+        assert_eq!(std::fs::read(landed.join("data.bin")).unwrap(), binary);
+        assert_eq!(
+            std::fs::read_to_string(landed.join("sub/note.txt")).unwrap(),
+            "héllo\n"
+        );
+        assert!(landed.join("empty").is_dir());
+        assert!(
+            reply.contains("pipe: it is a pipe, device, or socket"),
+            "{reply}"
+        );
+        assert!(!landed.join("pipe").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |name: &str| {
+                std::fs::metadata(landed.join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777
+            };
+            assert_eq!(mode("tool.sh"), 0o750);
+            assert_eq!(mode("run.sh"), 0o755);
+            assert_eq!(
+                std::fs::read_link(landed.join("notelink")).unwrap(),
+                std::path::Path::new("sub/note.txt")
+            );
+        }
+
+        let refused = transfer("from_computer", &back, "~/xfer", false)
+            .await
+            .unwrap_err();
+        assert!(refused.to_string().contains("already exists"), "{refused}");
+        let one = host.0.join("one.bin");
+        transfer("from_computer", &one, "~/xfer/data.bin", false)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&one).unwrap(), binary);
+        let missing = transfer("from_computer", &back, "~/nope", false)
+            .await
+            .unwrap_err();
+        assert!(missing.to_string().contains("does not exist"), "{missing}");
+        let no_host = transfer("to_computer", &host.0.join("nope"), "~/x", false)
+            .await
+            .unwrap_err();
+        assert!(no_host.to_string().contains("nope"), "{no_host}");
+
+        server.end(session.as_str()).await.unwrap();
+        server.shutdown().await;
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        use std::fmt::Write as _;
+        Sha256::digest(bytes)
+            .iter()
+            .fold(String::new(), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            })
     }
 }

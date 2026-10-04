@@ -1,0 +1,17 @@
+toolbar.height: 24
+toolbar.iconbar.focused: flat solid
+toolbar.iconbar.focused.color: #ffffff
+toolbar.iconbar.focused.textColor: #202020
+toolbar.iconbar.focused.borderWidth: 1
+toolbar.iconbar.focused.borderColor: #7a7a7a
+toolbar.iconbar.unfocused: flat solid
+toolbar.iconbar.unfocused.color: #d4d4d8
+toolbar.iconbar.unfocused.textColor: #404040
+toolbar.iconbar.unfocused.borderWidth: 1
+toolbar.iconbar.unfocused.borderColor: #a8a8ac
+toolbar.iconbar.empty: flat solid
+toolbar.iconbar.empty.color: #e8e8ec
+toolbar.iconbar.focused.colorTo: #ffffff
+toolbar.iconbar.focused.pixmap:
+toolbar.iconbar.unfocused.colorTo: #d4d4d8
+toolbar.iconbar.unfocused.pixmap:

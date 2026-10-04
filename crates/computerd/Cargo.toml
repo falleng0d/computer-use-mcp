@@ -18,6 +18,7 @@ anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.23.1"
 computer-protocol = { version = "0.2.0", path = "../computer-protocol" }
+computer-transfer = { version = "0.2.0", path = "../computer-transfer" }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }

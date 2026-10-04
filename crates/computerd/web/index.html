@@ -14,9 +14,19 @@
   <ul id="sessions"></ul>
 </aside>
 <main id="stage">
+  <header id="bar" hidden>
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+    <div id="bar-info"><span id="bar-screen"></span><span id="bar-title"></span><span id="bar-size"></span></div>
+    <span id="clip-notice" role="alert" hidden>Clipboard blocked by the browser</span>
+    <span id="lock-state" role="status"></span>
+    <button id="lock" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg><span id="lock-label"></span></button>
+    <button id="reconnect" class="icon-button" type="button" title="Reconnect" aria-label="Reconnect"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4"/></svg></button>
+  </header>
   <div id="banner" hidden>This session ended. The screen closes when you disconnect.</div>
-  <div id="screen"></div>
-  <div id="message"><span id="message-text"></span><button id="reconnect" hidden>Reconnect</button></div>
+  <div id="view">
+    <div id="screen"></div>
+    <div id="message"><span id="message-text"></span></div>
+  </div>
 </main>
 <script type="module" src="/app.js"></script>
 </body>

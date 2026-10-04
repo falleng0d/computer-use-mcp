@@ -29,6 +29,7 @@ use crate::{
 
 pub(crate) const XVNC_FIRST_PORT: u16 = 5900;
 const FLUXBOX_INIT: &str = "/etc/computerd/fluxbox-init";
+const TINT2_CONFIG: &str = "/etc/computerd/tint2rc";
 const X_SOCKET_DIR: &str = "/tmp/.X11-unix";
 const X_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const WM_READY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -99,11 +100,12 @@ fn display(number: u8) -> String {
     format!(":{number}")
 }
 
-/// The `Xvnc` and Fluxbox child processes of one screen.
+/// The `Xvnc`, Fluxbox, and dock child processes of one screen.
 struct Processes {
     number: u8,
     xvnc: Child,
     fluxbox: Option<Child>,
+    dock: Option<Child>,
 }
 
 impl Processes {
@@ -133,6 +135,7 @@ impl Processes {
             number,
             xvnc,
             fluxbox: None,
+            dock: None,
         })
     }
 
@@ -148,6 +151,22 @@ impl Processes {
             .context("starting Fluxbox")?;
         self.fluxbox = Some(fluxbox);
         Ok(())
+    }
+
+    /// The dock is cosmetic, so a failure to start it leaves the screen usable.
+    fn start_dock(&mut self) {
+        let dock = Command::new("tint2")
+            .args(["-c", TINT2_CONFIG])
+            .env_clear()
+            .envs(env::from_process(Some(self.number)))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .kill_on_drop(true)
+            .spawn();
+        match dock {
+            Ok(child) => self.dock = Some(child),
+            Err(error) => warn!(screen = self.number, %error, "could not start the dock"),
+        }
     }
 
     /// Fails when a child has already exited.
@@ -166,6 +185,7 @@ impl Processes {
     /// Kills both children, waits for them, and removes the X files they leave.
     async fn stop(mut self) {
         for (name, child) in [
+            ("tint2", self.dock.as_mut()),
             ("Fluxbox", self.fluxbox.as_mut()),
             ("Xvnc", Some(&mut self.xvnc)),
         ] {
@@ -265,6 +285,7 @@ impl Screen {
         if let Err(error) = ready {
             warn!(screen = number, error = %format!("{error:#}"), "continuing without a ready window manager");
         }
+        processes.start_dock();
         Ok(source)
     }
 

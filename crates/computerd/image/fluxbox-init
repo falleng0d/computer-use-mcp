@@ -1,4 +1,11 @@
 session.screen0.strftimeFormat: %d %b, %a %H:%M
 session.screen0.workspaces: 1
+session.screen0.toolbar.placement: TopCenter
+session.screen0.toolbar.tools: iconbar, clock
+session.screen0.iconbar.mode: {static groups} (workspace)
+session.screen0.iconbar.alignment: Left
+session.screen0.iconbar.iconWidth: 180
 session.menuFile: /etc/computerd/fluxbox-menu
 session.appsFile: /etc/computerd/fluxbox-apps
+session.styleOverlay: /etc/computerd/fluxbox-overlay
+session.styleFile: /etc/computerd/style/theme.cfg

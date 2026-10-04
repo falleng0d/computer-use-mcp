@@ -8,7 +8,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-publish.workspace = true
+publish = true
+readme = "../../README.md"
+keywords = ["mcp", "computer-use", "agent", "docker", "vnc"]
+categories = ["command-line-utilities", "development-tools"]
 
 [lints]
 workspace = true
@@ -19,9 +22,10 @@ bollard = "0.21.1"
 chrono = { version = "0.4.45", default-features = false, features = ["alloc"] }
 clap = { version = "4.6.7", features = ["derive"] }
 computer-protocol = { version = "0.2.0", path = "../computer-protocol" }
+computer-transfer = { version = "0.2.0", path = "../computer-transfer" }
 futures-util = "0.3.34"
 iana-time-zone = "0.1.65"
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "stream", "query"] }
 rmcp = { version = "3.5.0", default-features = false, features = ["server", "transport-io", "macros", "schemars"] }
 schemars = "1.2.2"
 semver = "1.0.28"
@@ -30,6 +34,7 @@ serde_json = "1.0.151"
 sha2 = { version = "0.11.0", default-features = false }
 thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "time", "sync", "signal", "process", "fs"] }
+tokio-util = { version = "0.7.19", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "ansi"] }
 uuid = { version = "1.27.0", features = ["v4"] }

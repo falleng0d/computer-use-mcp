@@ -53,6 +53,9 @@ install:
 image:
   docker build -f crates/computerd/Dockerfile -t {{dev_image}} .
 
+rm:
+    docker stop computer-use && docker rm computer-use
+
 image-check: image
   docker run --rm {{dev_image}} check-tools
   docker rm -f computer-use-mcp-check >/dev/null 2>&1 || true

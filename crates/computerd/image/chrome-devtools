@@ -1,0 +1,86 @@
+#!/bin/bash
+# Starts or stops chrome-devtools-mcp for this screen's Chromium, bridged by mcpc as @cdt-N.
+# Exit code 3 from `start` means the screen or its Chromium does not exist yet.
+set -u
+
+config=/etc/computer/mcpc.json
+call_secs=20
+connect_secs=40
+usage() { echo "usage: chrome-devtools start|stop" >&2; exit 2; }
+
+[ $# -eq 1 ] || usage
+case "${DISPLAY:-}" in
+  :[0-9]*) screen=${DISPLAY#:}; screen=${screen%%.*} ;;
+  *)
+    [ "$1" = stop ] && { echo "chrome-devtools: this session has no screen, nothing was running"; exit 0; }
+    echo "this session has no screen yet" >&2
+    exit 3
+    ;;
+esac
+session="cdt-$screen"
+export CDT_PORT=$((9221 + screen))
+export CDT_IDLE_SECS=${CDT_IDLE_SECS:-600}
+state="$HOME/.mcpc/$session.idle"
+running_pattern="(bridge/index.js @$session |browserUrl=http://127.0.0.1:$CDT_PORT([ \"]|\$))"
+
+mc() { timeout -k 2 "$1" mcpc "${@:2}"; }
+
+kill_leftovers() { pkill -f "$running_pattern" 2>/dev/null; return 0; }
+
+close_session() {
+  mc "$call_secs" "@$session" close >/dev/null 2>&1
+  local code=$?
+  kill_leftovers
+  rm -f "$state"
+  return $code
+}
+
+timed_out() { [ "$1" = 124 ] || [ "$1" = 137 ]; }
+
+case "$1" in
+  start)
+    if ! curl -fsS --max-time 3 "http://127.0.0.1:$CDT_PORT/json/version" >/dev/null 2>&1; then
+      echo "no Chromium is running on this screen" >&2
+      exit 3
+    fi
+    if [ "$(cat "$state" 2>/dev/null)" = "$CDT_IDLE_SECS" ] \
+      && mc "$call_secs" "@$session" tools-call list_pages '{}' >/dev/null 2>&1; then
+      echo "chrome-devtools: @$session already running"
+      echo "screen: $screen"
+      exit 0
+    fi
+    close_session
+    out=$(mc "$connect_secs" connect "$config:cdt" "@$session" 2>&1)
+    code=$?
+    if [ "$code" != 0 ]; then
+      close_session
+      if timed_out "$code"; then
+        echo "mcpc did not connect within $connect_secs s, nothing was left running" >&2
+      else
+        echo "$out" >&2
+      fi
+      exit 1
+    fi
+    mkdir -p "$(dirname "$state")" && echo "$CDT_IDLE_SECS" > "$state"
+    echo "chrome-devtools: @$session started"
+    echo "screen: $screen"
+    ;;
+  stop)
+    if ! pgrep -f "$running_pattern" >/dev/null 2>&1 && ! grep -q "\"@$session\"" "$HOME/.mcpc/sessions.json" 2>/dev/null; then
+      echo "chrome-devtools: @$session was not running"
+      exit 0
+    fi
+    mc "$call_secs" "@$session" close >/dev/null 2>&1
+    code=$?
+    kill_leftovers
+    rm -f "$state"
+    if timed_out "$code"; then
+      echo "chrome-devtools: @$session did not close within $call_secs s, its processes were killed"
+    elif [ "$code" = 0 ]; then
+      echo "chrome-devtools: @$session stopped"
+    else
+      echo "chrome-devtools: @$session was not running"
+    fi
+    ;;
+  *) usage ;;
+esac

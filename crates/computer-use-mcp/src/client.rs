@@ -2,11 +2,11 @@ use std::{num::NonZeroU32, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use computer_protocol::{
-    ActReply, ActRequest, ApiError, CreateSession, Health, LaunchAppRequest, ListFilesReply,
-    ListFilesRequest, Observation, OpenPathRequest, OwnerId, PROTOCOL_VERSION, ReadFileReply,
-    ReadFileRequest, ScreenSize, SessionCreated, SessionId, SessionTitle, SetCwdReply,
-    SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts, VERSION, ViewerInfo, WriteFileReply,
-    WriteFileRequest,
+    ActReply, ActRequest, ApiError, CreateSession, DownloadRequest, Health, LaunchAppRequest,
+    ListFilesReply, ListFilesRequest, Observation, OpenPathRequest, OwnerId, PROTOCOL_VERSION,
+    ReadFileReply, ReadFileRequest, ScreenSize, SessionCreated, SessionId, SessionTitle,
+    SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts, TransferReply,
+    UploadCheck, UploadQuery, VERSION, ViewerInfo, WriteFileReply, WriteFileRequest,
 };
 use reqwest::StatusCode;
 
@@ -21,6 +21,7 @@ const SHELL_MARGIN: Duration = Duration::from_secs(30);
 const FILE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Longest wait for `computerd` to start an application or a page, which includes starting the browser.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(100);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const HEALTH_DEADLINE: Duration = Duration::from_secs(60);
 /// Longest wait for `computerd` when the MCP server is shutting down.
@@ -51,8 +52,21 @@ fn protocol_mismatch(computer_protocol: u32, computer_version: &str, container: 
     }
 }
 
+/// Transfers have no total or read timeout, since the data phase is bounded by the stall checks of the transfer itself.
+fn streaming_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .no_proxy()
+        .build()
+        .context("building the HTTP client for transfers")
+}
+
 pub(crate) struct Client {
     http: reqwest::Client,
+    /// Has no total timeout, since a transfer takes as long as its data does. Waits for data are bounded by the read timeout.
+    streaming: reqwest::Client,
+    /// How long a transfer waits for data or for the computer's answer before it fails.
+    stall: Duration,
     base: String,
     token: String,
 }
@@ -64,11 +78,23 @@ impl Client {
             .no_proxy()
             .build()
             .context("building the HTTP client")?;
+        let streaming = streaming_client()?;
         Ok(Self {
             http,
+            streaming,
+            stall: computer_transfer::pipe::STALL,
             base: format!("http://127.0.0.1:{}", endpoint.port),
             token: endpoint.token.clone(),
         })
+    }
+
+    pub(crate) fn stall(&self) -> Duration {
+        self.stall
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_stall(self, stall: Duration) -> Self {
+        Self { stall, ..self }
     }
 
     async fn health(&self) -> Result<Health> {
@@ -355,6 +381,75 @@ impl Client {
     ) -> Result<WriteFileReply> {
         self.file_call(session, "write", request, "writing the file")
             .await
+    }
+
+    /// Asks whether the computer can take a root named `check.name` at `check.path`, before any data is sent.
+    ///
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub(crate) async fn upload_check(
+        &self,
+        session: &SessionId,
+        check_request: &UploadCheck,
+    ) -> Result<()> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/sessions/{session}/files/upload-check",
+                self.base
+            ))
+            .bearer_auth(&self.token)
+            .json(check_request)
+            .send()
+            .await
+            .context("asking the computer about the destination")?;
+        check(response).await.map(|_| ())
+    }
+
+    /// Sends a tar archive for the computer to unpack at `path`.
+    ///
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub(crate) async fn upload(
+        &self,
+        session: &SessionId,
+        query: &UploadQuery,
+        body: reqwest::Body,
+    ) -> Result<TransferReply> {
+        let response = self
+            .streaming
+            .post(format!("{}/sessions/{session}/files/upload", self.base))
+            .bearer_auth(&self.token)
+            .query(query)
+            .body(body)
+            .send()
+            .await
+            .context("sending the files to the computer failed, the computer may have ended the transfer because the session ended or it stopped")?;
+        read_reply(response, "reading the result of the transfer").await
+    }
+
+    /// Asks the computer for a tar archive of `path`. The archive is the response body.
+    ///
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub(crate) async fn download(
+        &self,
+        session: &SessionId,
+        path: String,
+    ) -> Result<reqwest::Response> {
+        let sending = self
+            .streaming
+            .post(format!("{}/sessions/{session}/files/download", self.base))
+            .bearer_auth(&self.token)
+            .json(&DownloadRequest { path })
+            .send();
+        let response = tokio::time::timeout(self.stall, sending)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "the computer did not start sending within {} s",
+                    self.stall.as_secs_f64()
+                )
+            })?
+            .context("asking the computer for the files")?;
+        check(response).await
     }
 
     async fn file_call<B: serde::Serialize, T: serde::de::DeserializeOwned>(

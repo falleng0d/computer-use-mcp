@@ -3,6 +3,14 @@ import RFB from '/novnc/core/rfb.js';
 const KEY_STORE = 'computerKey';
 const RETRY_MS = 2000;
 const FLASH_MS = 3000;
+const NOTICE_MS = 6000;
+const PASTE_WAIT_MS = 250;
+const SELECTION_SETTLE_MS = 40;
+const XK_V = 0x76;
+const XK_CONTROL_L = 0xffe3;
+const XK_ALT_L = 0xffe9;
+const XK_SUPER_L = 0xffeb;
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 
 const el = (id) => document.getElementById(id);
 const statusEl = el('status');
@@ -11,7 +19,15 @@ const screenEl = el('screen');
 const messageEl = el('message');
 const messageText = el('message-text');
 const reconnectBtn = el('reconnect');
+const barEl = el('bar');
+const barScreen = el('bar-screen');
+const barTitle = el('bar-title');
+const barSize = el('bar-size');
+const lockState = el('lock-state');
+const lockBtn = el('lock');
+const lockLabel = el('lock-label');
 const bannerEl = el('banner');
+const clipNotice = el('clip-notice');
 
 let sessions = [];
 let selected = null;
@@ -52,10 +68,146 @@ function setStatus(text, bad = false) {
   statusEl.className = bad ? 'bad' : '';
 }
 
-function showMessage(text, canReconnect = false) {
+function showMessage(text) {
   messageText.textContent = text;
-  reconnectBtn.hidden = !canReconnect;
   messageEl.hidden = !text;
+}
+
+// The lock is per page. Every new connection starts locked. Clipboard code
+// asks `isUnlocked()` before it forwards anything to the screen.
+let unlocked = false;
+
+function isUnlocked() {
+  return unlocked && connected && rfb !== null;
+}
+
+function setUnlocked(value) {
+  unlocked = value && connected && rfb !== null;
+  if (!unlocked) cancelPaste();
+  if (rfb) {
+    rfb.viewOnly = !unlocked;
+    if (unlocked) rfb.focus();
+    else rfb.blur();
+  }
+  renderBar();
+}
+
+let noticeTimer = null;
+
+function showClipboardNotice() {
+  clipNotice.hidden = false;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => {
+    clipNotice.hidden = true;
+  }, NOTICE_MS);
+}
+
+let paste = null;
+
+function cancelPaste() {
+  if (paste) clearTimeout(paste.timer);
+  paste = null;
+}
+
+function isPasteShortcut(e) {
+  const isV = e.key.toLowerCase() === 'v' || (e.code === 'KeyV' && /^\p{L}$/u.test(e.key) && !/^[a-z]$/i.test(e.key));
+  if (!isV || e.altKey || e.shiftKey) return false;
+  return IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+}
+
+let shortcutHeld = false;
+
+// Hands the host text to the screen, then sends Ctrl+V so the focused app
+// pastes it. On macOS the screen sees Cmd as Alt or Super, so those are
+// released and Ctrl is pressed and released here. Elsewhere Ctrl is pressed
+// again in case it was released while the text was being read, and released
+// afterwards unless the user still holds the key.
+function finishPaste(current, text) {
+  clearTimeout(current.timer);
+  const { client } = current;
+  const alive = () => paste === current && rfb === client && isUnlocked();
+  if (current.sent || !alive()) return;
+  current.sent = true;
+  if (text) client.clipboardPasteFrom(text);
+  current.timer = setTimeout(() => {
+    if (!alive()) return;
+    paste = null;
+    if (IS_MAC) {
+      client.sendKey(XK_ALT_L, 'MetaLeft', false);
+      client.sendKey(XK_SUPER_L, 'MetaRight', false);
+    }
+    client.sendKey(XK_CONTROL_L, 'ControlLeft', true);
+    client.sendKey(XK_V, 'KeyV');
+    if (IS_MAC || !shortcutHeld) client.sendKey(XK_CONTROL_L, 'ControlLeft', false);
+  }, text ? SELECTION_SETTLE_MS : 0);
+}
+
+// noVNC stops keydown events, so the page's own keydown listener runs first
+// (capture) and lets the browser's paste event happen. That event carries the
+// text without a permission prompt. The Clipboard API is the fallback.
+screenEl.addEventListener(
+  'keyup',
+  (e) => {
+    shortcutHeld = IS_MAC ? e.metaKey : e.ctrlKey;
+  },
+  true,
+);
+
+screenEl.addEventListener(
+  'keydown',
+  (e) => {
+    shortcutHeld = IS_MAC ? e.metaKey : e.ctrlKey;
+    if (!isUnlocked() || !isPasteShortcut(e)) return;
+    e.stopPropagation();
+    if (e.repeat || paste !== null) return;
+    const current = { client: rfb, timer: null };
+    paste = current;
+    current.timer = setTimeout(async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        finishPaste(current, text);
+      } catch (error) {
+        console.debug('clipboard read failed', error);
+        if (paste === current) paste = null;
+        showClipboardNotice();
+      }
+    }, PASTE_WAIT_MS);
+  },
+  true,
+);
+
+document.addEventListener(
+  'paste',
+  (e) => {
+    if (paste === null) return;
+    e.preventDefault();
+    finishPaste(paste, e.clipboardData?.getData('text/plain') ?? '');
+  },
+  true,
+);
+
+function copyToHost(text) {
+  if (!isUnlocked() || !text) return;
+  navigator.clipboard.writeText(text).catch((error) => {
+    console.debug('clipboard write failed', error);
+    showClipboardNotice();
+  });
+}
+
+function renderBar() {
+  barEl.hidden = !selected || !(connected || sessionOn(selected));
+  if (barEl.hidden) return;
+  const open = isUnlocked();
+  barEl.classList.toggle('unlocked', open);
+  barScreen.textContent = `Screen ${selected}`;
+  barTitle.textContent = sessionOn(selected)?.title ?? '';
+  const canvas = connected ? screenEl.querySelector('canvas') : null;
+  barSize.textContent = canvas ? `${canvas.width}x${canvas.height}` : '';
+  lockState.textContent = open ? 'You are in control' : 'View only';
+  lockLabel.textContent = open ? 'Lock' : 'Unlock';
+  lockBtn.classList.toggle('unlock', !open);
+  lockBtn.disabled = !connected;
+  lockBtn.title = open ? 'Stop sending mouse and keyboard to the screen' : 'Send mouse and keyboard to the screen';
 }
 
 function sessionOn(screen) {
@@ -89,6 +241,7 @@ function render() {
   if (sessions.length === 0) setStatus('No sessions yet.');
   else setStatus('');
   bannerEl.hidden = !(connected && selected && !sessionOn(selected));
+  renderBar();
 }
 
 function flash(screen) {
@@ -107,6 +260,7 @@ function disconnect() {
     old.disconnect();
   }
   connected = false;
+  unlocked = false;
   screenEl.replaceChildren();
 }
 
@@ -121,6 +275,7 @@ function select(screen) {
 
 function connect() {
   disconnect();
+  renderBar();
   if (!selected) {
     showMessage(sessions.length ? 'Pick a screen on the left.' : 'No sessions yet.');
     return;
@@ -133,28 +288,35 @@ function connect() {
   const client = new RFB(screenEl, url, { credentials: { password: key } });
   client.scaleViewport = true;
   client.resizeSession = false;
+  client.viewOnly = true;
   client.addEventListener('connect', () => {
+    if (rfb !== client) return;
     connected = true;
     showMessage('');
+    setUnlocked(false);
     render();
   });
+  client.addEventListener('clipboard', (e) => copyToHost(e.detail.text));
   client.addEventListener('securityfailure', () => {
+    if (rfb !== client) return;
     showMessage('The VNC password was refused. Open the link from the computer logs again.', false);
   });
   client.addEventListener('disconnect', () => {
     if (rfb !== client) return;
     rfb = null;
     connected = false;
+    unlocked = false;
     screenEl.replaceChildren();
     if (keyRejected) showMessage('Wrong key. Open the link from the computer logs again.');
     else if (!sessionOn(screen)) showMessage(`Screen ${screen} ended.`);
-    else showMessage(`Disconnected from screen ${screen}.`, true);
+    else showMessage(`Disconnected from screen ${screen}.`);
     render();
   });
   rfb = client;
 }
 
 reconnectBtn.addEventListener('click', connect);
+lockBtn.addEventListener('click', () => setUnlocked(!isUnlocked()));
 
 function handle(name, data) {
   if (name === 'sessions') {

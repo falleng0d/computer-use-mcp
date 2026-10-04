@@ -8,11 +8,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use axum::body::Body;
 use computer_protocol::{
-    ActReply, ActRequest, CreateSession, DEFAULT_PORT_BASE, LaunchAppRequest, ListFilesReply,
-    ListFilesRequest, Observation, OpenPathRequest, OwnerId, ReadFileReply, ReadFileRequest,
-    ScreenSize, SessionId, SessionTitle, SetCwdReply, SetCwdRequest, ShellReply, ShellRequest,
-    ShellTimeouts, WriteFileReply, WriteFileRequest,
+    ActReply, ActRequest, CreateSession, DEFAULT_PORT_BASE, DownloadRequest, LaunchAppRequest,
+    ListFilesReply, ListFilesRequest, Observation, OpenPathRequest, OwnerId, ReadFileReply,
+    ReadFileRequest, ScreenSize, SessionId, SessionTitle, SetCwdReply, SetCwdRequest, ShellReply,
+    ShellRequest, ShellTimeouts, TransferReply, UploadCheck, UploadQuery, WriteFileReply,
+    WriteFileRequest,
 };
 use serde::Serialize;
 use tokio::{task::JoinHandle, time::Instant};
@@ -25,7 +27,7 @@ use crate::{
     liveness::{self, EndReason, Liveness},
     numbers::Numbers,
     screen::{Screen, ScreenError},
-    workdir,
+    transfer, workdir,
 };
 
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(25);
@@ -643,6 +645,70 @@ impl Sessions {
         let cwd = lock(&active.session.cwd).clone();
         let home = self.home.clone();
         blocking(move || files::write(&cwd, &home, &request)).await
+    }
+
+    /// Unpacks a tar archive onto the computer. A relative destination starts at the session's working folder.
+    pub(crate) async fn upload(
+        &self,
+        id: &SessionId,
+        query: UploadQuery,
+        body: Body,
+    ) -> Result<TransferReply, SessionError> {
+        let active = self.begin(id)?;
+        if query.path.trim().is_empty() {
+            return Err(SessionError::Rejected(
+                "computer_path must not be empty".to_owned(),
+            ));
+        }
+        let cwd = lock(&active.session.cwd).clone();
+        let dest = workdir::resolve(&cwd, &self.home, &query.path);
+        transfer::upload(dest, query.overwrite, body, active.session.cancel.clone()).await
+    }
+
+    /// Refuses a transfer that cannot land, before any data is sent.
+    pub(crate) async fn upload_check(
+        &self,
+        id: &SessionId,
+        request: UploadCheck,
+    ) -> Result<(), SessionError> {
+        let active = self.begin(id)?;
+        if request.path.trim().is_empty() {
+            return Err(SessionError::Rejected(
+                "computer_path must not be empty".to_owned(),
+            ));
+        }
+        let cwd = lock(&active.session.cwd).clone();
+        let dest = workdir::resolve(&cwd, &self.home, &request.path);
+        blocking(move || {
+            computer_transfer::check_destination(
+                &dest,
+                &request.name,
+                request.folder,
+                request.overwrite,
+                computer_transfer::Platform::current(),
+            )
+            .map(|_| ())
+        })
+        .await
+    }
+
+    /// Packs a file or folder of the computer as a tar archive. A relative path starts at the session's working folder.
+    pub(crate) async fn download(
+        &self,
+        id: &SessionId,
+        request: DownloadRequest,
+    ) -> Result<Body, SessionError> {
+        let active = self.begin(id)?;
+        let cwd = lock(&active.session.cwd).clone();
+        let source = workdir::resolve(&cwd, &self.home, &request.path);
+        if let Err(error) = tokio::fs::metadata(&source).await {
+            return Err(SessionError::Rejected(match error.kind() {
+                std::io::ErrorKind::NotFound => format!("{} does not exist", source.display()),
+                _ => format!("cannot read {}: {error}", source.display()),
+            }));
+        }
+        let cancel = active.session.cancel.clone();
+        Ok(transfer::download(source, cancel, &self.closing, active))
     }
 
     /// Kills every running command and refuses new ones. Called when `computerd` starts to shut down.

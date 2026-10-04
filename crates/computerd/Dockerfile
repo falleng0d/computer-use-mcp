@@ -33,9 +33,10 @@ RUN git clone --quiet --depth 1 --branch "v${NOVNC_VERSION}" https://github.com/
 FROM debian:trixie-slim
 ARG NODE_MAJOR=24
 # apt lists stay in the image so `sudo apt-get install` works without an update first.
+# The bootstraprc sed gives each X display its own LibreOffice profile, so each screen runs its own instance.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        locales tzdata tigervnc-standalone-server fluxbox xterm chromium xdg-utils shared-mime-info xkb-data x11-utils imagemagick hsetroot \
+        locales tzdata tigervnc-standalone-server fluxbox tint2 xterm chromium xdg-utils shared-mime-info xkb-data x11-utils imagemagick hsetroot libreoffice-writer libreoffice-calc libreoffice-impress libfile-mimeinfo-perl \
         fonts-dejavu-core fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
         sudo ca-certificates curl git openssh-client jq ripgrep xclip xsel \
         python3 python3-pip python3-venv ruby build-essential fish \
@@ -49,12 +50,17 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gh nodejs \
     && sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen \
     && locale-gen \
-    && rm -f /etc/chromium.d/dev-shm
+    && rm -f /etc/chromium.d/dev-shm \
+    && sed -i 's|^UserInstallation=.*|UserInstallation=$SYSUSERCONFIG/libreoffice/screen$DISPLAY|' /usr/lib/libreoffice/program/bootstraprc
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 COPY --from=uv /uv /uvx /usr/local/bin/
 COPY --from=aws /usr/local/aws-cli /usr/local/aws-cli
 RUN ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws \
     && ln -s /usr/local/aws-cli/v2/current/bin/aws_completer /usr/local/bin/aws_completer
+ARG MCPC_VERSION=0.7.0
+ARG CHROME_DEVTOOLS_MCP_VERSION=1.10.1
+RUN npm install -g --no-fund --no-audit "@apify/mcpc@${MCPC_VERSION}" "chrome-devtools-mcp@${CHROME_DEVTOOLS_MCP_VERSION}" \
+    && npm cache clean --force
 RUN useradd --create-home --uid 1000 --shell /bin/bash computer \
     && echo 'computer ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/computer \
     && chmod 0440 /etc/sudoers.d/computer \
@@ -62,6 +68,10 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash computer \
 COPY --chmod=0644 crates/computerd/image/profile.sh /etc/profile.d/computer.sh
 COPY --chmod=0644 crates/computerd/image/XTerm /etc/X11/app-defaults/XTerm
 COPY --chmod=0755 crates/computerd/image/check-tools.sh /usr/local/bin/check-tools
+COPY --chmod=0755 crates/computerd/image/chrome-devtools /usr/local/bin/chrome-devtools
+COPY --chmod=0755 crates/computerd/image/chrome-devtools-serve /usr/local/bin/chrome-devtools-serve
+COPY --chmod=0644 crates/computerd/image/mcpc.json /etc/computer/mcpc.json
+RUN chmod 0755 /etc/computer
 COPY --from=build /usr/local/bin/computerd /usr/local/bin/computerd
 COPY --from=novnc /out /opt/novnc
 ARG COMPUTER_USE_MCP_VERSION=""
@@ -69,9 +79,16 @@ LABEL org.opencontainers.image.version="${COMPUTER_USE_MCP_VERSION}"
 COPY crates/computerd/image/fluxbox-init /etc/computerd/fluxbox-init
 COPY crates/computerd/image/fluxbox-menu /etc/computerd/fluxbox-menu
 COPY crates/computerd/image/fluxbox-apps /etc/computerd/fluxbox-apps
+COPY crates/computerd/image/fluxbox-overlay /etc/computerd/fluxbox-overlay
+RUN cp -r /usr/share/fluxbox/styles/Squared_for_Debian /etc/computerd/style \
+    && sed -i -e 's|^background:.*|background: flat|' -e 's|^background.pixmap:.*|background.color: #2b2b2b|' /etc/computerd/style/theme.cfg
+COPY crates/computerd/image/tint2rc /etc/computerd/tint2rc
+COPY crates/computerd/image/computer-terminal.desktop /usr/share/applications/computer-terminal.desktop
+RUN sed -i -e 's/[[:space:]]*$//' -e '1s/^\o357\o273\o277//' /etc/computerd/tint2rc /etc/computerd/fluxbox-overlay /usr/share/applications/computer-*.desktop
 COPY crates/computerd/image/chromium-policy.json /etc/chromium/policies/managed/computer-use.json
 COPY crates/computerd/image/computer-browser.desktop /usr/share/applications/computer-browser.desktop
 COPY crates/computerd/image/mimeapps.list /etc/xdg/mimeapps.list
+COPY crates/computerd/image/libreoffice-computer.xcd /usr/lib/libreoffice/share/registry/computer.xcd
 ENV NPM_CONFIG_PREFIX=/home/computer/.local \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
     PATH=/home/computer/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
