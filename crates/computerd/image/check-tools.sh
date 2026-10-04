@@ -23,6 +23,39 @@ check xdg-open --version
 check Xvnc -help
 check python3 -m venv --help
 check sudo -n true
+check chrome-devtools-mcp --version
+check mcpc --version
+check_devtools() {
+  profile=$(mktemp -d)
+  DISPLAY=:1 chromium --headless=new --no-sandbox --disable-dev-shm-usage --user-data-dir="$profile" --remote-debugging-port=9222 about:blank >/dev/null 2>&1 &
+  browser=$!
+  ready=0
+  for _ in $(seq 1 40); do
+    curl -fsS http://127.0.0.1:9222/json/version >/dev/null 2>&1 && { ready=1; break; }
+    sleep 0.5
+  done
+  if [ "$ready" = 1 ]; then
+    export DISPLAY=:1
+    chrome-devtools start >/dev/null 2>&1 || { echo "chrome-devtools start failed" >&2; failed=1; }
+    mcpc @cdt-1 tools-call list_pages '{}' 2>&1 | grep -q 'about:blank' || { echo "list_pages did not show the page" >&2; failed=1; }
+    chrome-devtools stop >/dev/null 2>&1
+    pgrep -f 'chrome-devtools-mcp|mcpc/dist/bridge' >/dev/null && { echo "DevTools processes left after stop" >&2; failed=1; }
+    CDT_IDLE_SECS=3 chrome-devtools start >/dev/null 2>&1
+    mcpc @cdt-1 tools-call list_pages '{}' >/dev/null 2>&1
+    sleep 8
+    pgrep -f 'chrome-devtools-mcp|mcpc/dist/bridge' >/dev/null && { echo "DevTools processes left after the idle time" >&2; failed=1; }
+    mcpc @cdt-1 tools-call list_pages '{}' 2>&1 | grep -q 'about:blank' || { echo "an idle session did not come back on the next call" >&2; failed=1; }
+    chrome-devtools stop >/dev/null 2>&1
+    unset DISPLAY
+  else
+    echo "chromium did not start for the DevTools check" >&2
+    failed=1
+  fi
+  kill "$browser" 2>/dev/null
+  wait "$browser" 2>/dev/null
+  rm -rf "$profile"
+}
+check_devtools
 [ "$(getent passwd computer | cut -d: -f7)" = /bin/bash ] || { echo "default shell is not bash" >&2; failed=1; }
 case "$(bash -lc 'echo $PATH')" in
   /home/computer/.local/bin:*) ;;

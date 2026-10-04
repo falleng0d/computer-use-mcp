@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "cdt": {
+      "command": "chrome-devtools-serve",
+      "args": [
+        "--browserUrl=http://127.0.0.1:${CDT_PORT}",
+        "--no-usage-statistics",
+        "--no-performance-crux"
+      ],
+      "env": {
+        "CDT_PORT": "${CDT_PORT}",
+        "CDT_IDLE_SECS": "${CDT_IDLE_SECS}"
+      }
+    }
+  }
+}

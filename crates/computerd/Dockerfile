@@ -57,6 +57,9 @@ COPY --from=uv /uv /uvx /usr/local/bin/
 COPY --from=aws /usr/local/aws-cli /usr/local/aws-cli
 RUN ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws \
     && ln -s /usr/local/aws-cli/v2/current/bin/aws_completer /usr/local/bin/aws_completer
+ARG MCPC_VERSION=0.7.0
+ARG CHROME_DEVTOOLS_MCP_VERSION=1.10.1
+RUN npm install -g --no-fund --no-audit "@apify/mcpc@${MCPC_VERSION}" "chrome-devtools-mcp@${CHROME_DEVTOOLS_MCP_VERSION}"     && npm cache clean --force
 RUN useradd --create-home --uid 1000 --shell /bin/bash computer \
     && echo 'computer ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/computer \
     && chmod 0440 /etc/sudoers.d/computer \
@@ -64,6 +67,10 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash computer \
 COPY --chmod=0644 crates/computerd/image/profile.sh /etc/profile.d/computer.sh
 COPY --chmod=0644 crates/computerd/image/XTerm /etc/X11/app-defaults/XTerm
 COPY --chmod=0755 crates/computerd/image/check-tools.sh /usr/local/bin/check-tools
+COPY --chmod=0755 crates/computerd/image/chrome-devtools /usr/local/bin/chrome-devtools
+COPY --chmod=0755 crates/computerd/image/chrome-devtools-serve /usr/local/bin/chrome-devtools-serve
+COPY --chmod=0644 crates/computerd/image/mcpc.json /etc/computer/mcpc.json
+RUN chmod 0755 /etc/computer
 COPY --from=build /usr/local/bin/computerd /usr/local/bin/computerd
 COPY --from=novnc /out /opt/novnc
 ARG COMPUTER_USE_MCP_VERSION=""
