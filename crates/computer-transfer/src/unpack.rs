@@ -800,7 +800,7 @@ mod tests {
         let out = Dir::new();
         let error = put(&out.0, &archive, false).unwrap_err();
         assert!(error.message.contains("symbolic link"), "{error}");
-        assert!(files_under(&outside.0).is_empty());
+        assert_eq!(files_under(&outside.0), Vec::<String>::new());
     }
 
     #[cfg(unix)]
@@ -814,11 +814,11 @@ mod tests {
         fs::set_permissions(root.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
         std::os::unix::fs::symlink("blob.bin", root.join("link")).unwrap();
         std::os::unix::fs::symlink("/nonexistent/absolute", root.join("dangling")).unwrap();
-        let made = std::process::Command::new("mkfifo")
+        let fifo = std::process::Command::new("mkfifo")
             .arg(root.join("pipe"))
             .status()
             .unwrap();
-        assert!(made.success());
+        assert!(fifo.success());
 
         let out = Dir::new();
         let done = put(&out.0, &packed(&root), false).unwrap();
