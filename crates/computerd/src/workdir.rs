@@ -3,14 +3,14 @@
 use std::path::{Component, Path, PathBuf};
 
 /// Folder a session starts in and the meaning of `~`.
-pub fn home_dir() -> PathBuf {
+pub(crate) fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
         .map_or_else(|| PathBuf::from("/home/computer"), PathBuf::from)
 }
 
 /// Where `input` points when typed in `current`: `~` is `home`, a relative path starts at `current`.
-pub fn resolve(current: &Path, home: &Path, input: &str) -> PathBuf {
+pub(crate) fn resolve(current: &Path, home: &Path, input: &str) -> PathBuf {
     let input = input.trim();
     let path = if input == "~" {
         home.to_path_buf()
@@ -36,7 +36,11 @@ pub fn resolve(current: &Path, home: &Path, input: &str) -> PathBuf {
 /// # Errors
 ///
 /// Fails with a message for the agent when the path is not an existing folder.
-pub async fn existing_dir(current: &Path, home: &Path, input: &str) -> Result<PathBuf, String> {
+pub(crate) async fn existing_dir(
+    current: &Path,
+    home: &Path,
+    input: &str,
+) -> Result<PathBuf, String> {
     let wanted = resolve(current, home, input);
     let shown = wanted.display();
     let real = tokio::fs::canonicalize(&wanted)

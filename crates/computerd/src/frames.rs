@@ -2,22 +2,22 @@ use anyhow::{Context, Result};
 
 /// Tracks which frame a screen shows and which one its session saw last.
 #[derive(Debug, Default)]
-pub struct FrameTracker {
+pub(crate) struct FrameTracker {
     current: u64,
     seen: Option<u64>,
 }
 
 /// What an observation should return for the current frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Frame {
-    pub id: u64,
+pub(crate) struct Frame {
+    pub(crate) id: u64,
     /// False when the session already has this frame's image.
-    pub send_image: bool,
+    pub(crate) send_image: bool,
 }
 
 impl FrameTracker {
     /// Records an observation. `damaged` says whether the screen changed since the previous one.
-    pub fn observe(&mut self, damaged: bool) -> Frame {
+    pub(crate) fn observe(&mut self, damaged: bool) -> Frame {
         if damaged || self.current == 0 {
             self.current += 1;
         }
@@ -29,16 +29,16 @@ impl FrameTracker {
     }
 
     /// Marks the current frame's image as delivered to the session.
-    pub fn delivered(&mut self) {
+    pub(crate) fn delivered(&mut self) {
         self.seen = Some(self.current);
     }
 }
 
 /// Bytes per pixel in the X server's 24-bit depth format.
-pub const BYTES_PER_PIXEL: usize = 4;
+pub(crate) const BYTES_PER_PIXEL: usize = 4;
 
 /// Converts little-endian BGRX pixels to packed RGB.
-pub fn bgrx_to_rgb(bgrx: &[u8]) -> Vec<u8> {
+pub(crate) fn bgrx_to_rgb(bgrx: &[u8]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(bgrx.len() / BYTES_PER_PIXEL * 3);
     let (pixels, _) = bgrx.as_chunks::<BYTES_PER_PIXEL>();
     for pixel in pixels {
@@ -48,7 +48,7 @@ pub fn bgrx_to_rgb(bgrx: &[u8]) -> Vec<u8> {
 }
 
 /// Encodes packed RGB pixels as a PNG.
-pub fn encode_png(width: u16, height: u16, rgb: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn encode_png(width: u16, height: u16, rgb: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut encoder = png::Encoder::new(&mut out, u32::from(width), u32::from(height));
     encoder.set_color(png::ColorType::Rgb);

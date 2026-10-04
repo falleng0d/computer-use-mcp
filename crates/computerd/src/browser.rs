@@ -37,7 +37,7 @@ const BROWSER_EXTENSIONS: [&str; 15] = [
 ];
 
 /// Port of the `DevTools` endpoint of screen `number`, on the container's loopback only.
-pub fn devtools_port(number: u8) -> u16 {
+fn devtools_port(number: u8) -> u16 {
     FIRST_DEVTOOLS_PORT + u16::from(number)
 }
 
@@ -73,7 +73,7 @@ fn command_line(profile: &Path, number: u8, size: ScreenSize, url: Option<&str>)
 
 /// What `open_path` was asked to open.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Target {
+pub(crate) enum Target {
     /// An http(s) URL.
     Url(String),
     /// A file Chromium shows itself.
@@ -87,7 +87,7 @@ pub enum Target {
 /// # Errors
 ///
 /// Fails with a message for the agent when the text is empty or a URL of another kind.
-pub fn classify(input: &str, cwd: &Path, home: &Path) -> Result<Target, String> {
+pub(crate) fn classify(input: &str, cwd: &Path, home: &Path) -> Result<Target, String> {
     let input = input.trim();
     if input.is_empty() {
         return Err("give a file path or an http(s) URL to open".to_owned());
@@ -118,7 +118,7 @@ pub fn classify(input: &str, cwd: &Path, home: &Path) -> Result<Target, String> 
 }
 
 /// The `file://` URL of an absolute path.
-pub fn file_url(path: &Path) -> String {
+pub(crate) fn file_url(path: &Path) -> String {
     let mut url = String::from("file://");
     for byte in path.to_string_lossy().bytes() {
         match byte {
@@ -134,7 +134,7 @@ pub fn file_url(path: &Path) -> String {
 }
 
 /// The running Chromium of a screen. The screen owns it and closes it with the screen.
-pub struct Browser {
+pub(crate) struct Browser {
     child: Child,
     profile: PathBuf,
     baseline: profile::Baseline,
@@ -144,7 +144,7 @@ pub struct Browser {
 
 impl Browser {
     /// Starts Chromium on screen `number` and waits until its `DevTools` endpoint answers.
-    pub async fn start(number: u8, size: ScreenSize, url: Option<&str>) -> Result<Self> {
+    pub(crate) async fn start(number: u8, size: ScreenSize, url: Option<&str>) -> Result<Self> {
         let home = workdir::home_dir();
         let profile = profile::scratch_dir(number);
         let prepared = profile.clone();
@@ -214,7 +214,7 @@ impl Browser {
     }
 
     /// Whether the Chromium process is still running.
-    pub fn is_running(&mut self) -> bool {
+    pub(crate) fn is_running(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
 
@@ -222,7 +222,7 @@ impl Browser {
     ///
     /// A second Chromium command on the same profile hands the URL to the running one and exits.
     /// It checks the sandbox before it finds the running one, so it needs the same flag.
-    pub async fn open_url(&self, url: &str, number: u8) -> Result<()> {
+    pub(crate) async fn open_url(&self, url: &str, number: u8) -> Result<()> {
         let mut child = Command::new(CHROMIUM)
             .arg(format!("--user-data-dir={}", self.profile.display()))
             .args([NO_SANDBOX, "--", url])
@@ -251,7 +251,7 @@ impl Browser {
 
     /// Reads the cookies one last time, asks Chromium to quit so it saves its profile, and kills
     /// it when it does not. A clean quit hands the profile's shared files to the template.
-    pub async fn close(mut self) {
+    pub(crate) async fn close(mut self) {
         if let Some(sync) = cookie_sync::shared() {
             sync.detach(self.number).await;
         }

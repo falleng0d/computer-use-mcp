@@ -5,27 +5,27 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub const FIRST_SCREEN: u8 = 1;
-pub const LAST_SCREEN: u8 = 16;
+pub(crate) const FIRST_SCREEN: u8 = 1;
+pub(crate) const LAST_SCREEN: u8 = 16;
 
 /// Lowest screen number from [`FIRST_SCREEN`] to [`LAST_SCREEN`] that is not in `used`.
-pub fn lowest_free(used: &BTreeSet<u8>) -> Option<u8> {
+fn lowest_free(used: &BTreeSet<u8>) -> Option<u8> {
     (FIRST_SCREEN..=LAST_SCREEN).find(|number| !used.contains(number))
 }
 
 /// The screen numbers in use. A [`Lease`] frees its number when dropped.
 #[derive(Debug, Clone, Default)]
-pub struct Numbers(Arc<Mutex<BTreeSet<u8>>>);
+pub(crate) struct Numbers(Arc<Mutex<BTreeSet<u8>>>);
 
 #[derive(Debug)]
-pub struct Lease {
+pub(crate) struct Lease {
     numbers: Numbers,
     number: u8,
 }
 
 impl Numbers {
     /// Takes the lowest free number, or `None` when all 16 screens exist.
-    pub fn lease(&self) -> Option<Lease> {
+    pub(crate) fn lease(&self) -> Option<Lease> {
         let mut used = self
             .0
             .lock()
@@ -40,7 +40,7 @@ impl Numbers {
 }
 
 impl Lease {
-    pub fn number(&self) -> u8 {
+    pub(crate) fn number(&self) -> u8 {
         self.number
     }
 }

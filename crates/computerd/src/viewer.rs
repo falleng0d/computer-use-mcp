@@ -643,21 +643,21 @@ impl axum::serve::Listener for Capped {
 }
 
 /// What the viewer needs from the rest of the daemon.
-pub struct Config {
-    pub key: String,
-    pub sessions: Sessions,
-    pub novnc: PathBuf,
+pub(crate) struct Config {
+    pub(crate) key: String,
+    pub(crate) sessions: Sessions,
+    pub(crate) novnc: PathBuf,
 }
 
 /// The running viewer servers.
-pub struct Running {
+pub(crate) struct Running {
     tasks: TaskTracker,
     stop: CancellationToken,
 }
 
 impl Running {
     /// Closes every viewer connection and waits for the servers to end.
-    pub async fn stop(self) {
+    pub(crate) async fn stop(self) {
         self.stop.cancel();
         self.tasks.close();
         self.tasks.wait().await;
@@ -665,7 +665,7 @@ impl Running {
 }
 
 /// Binds the page port and the 16 raw VNC ports, then serves them in tasks that `Running` owns.
-pub async fn start(config: Config) -> Result<Running> {
+pub(crate) async fn start(config: Config) -> Result<Running> {
     let hub = config.sessions.hub();
     let stop = CancellationToken::new();
     let tasks = TaskTracker::new();

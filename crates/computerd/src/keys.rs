@@ -1,8 +1,8 @@
 //! Key names, keysyms, and the keyboard mapping lookups used to type.
 
-pub const SHIFT_L: u32 = 0xffe1;
-pub const RETURN: u32 = 0xff0d;
-pub const TAB: u32 = 0xff09;
+pub(crate) const SHIFT_L: u32 = 0xffe1;
+pub(crate) const RETURN: u32 = 0xff0d;
+const TAB: u32 = 0xff09;
 
 /// Offset that turns a Unicode code point into a keysym outside Latin-1.
 const UNICODE_KEYSYM_BASE: u32 = 0x0100_0000;
@@ -48,7 +48,7 @@ const LAST_FUNCTION_KEY: u32 = 12;
 /// Keysym for typing `c`, or `None` for control characters that have no key.
 ///
 /// A newline is Enter and a tab is Tab. A carriage return has no key.
-pub fn char_keysym(c: char) -> Option<u32> {
+pub(crate) fn char_keysym(c: char) -> Option<u32> {
     match c {
         '\n' => Some(RETURN),
         '\t' => Some(TAB),
@@ -59,7 +59,7 @@ pub fn char_keysym(c: char) -> Option<u32> {
 }
 
 /// Keysym for a key name such as `enter`, `PageDown`, `f5`, or a single character.
-pub fn key_keysym(name: &str) -> Result<u32, String> {
+pub(crate) fn key_keysym(name: &str) -> Result<u32, String> {
     let mut chars = name.chars();
     if let (Some(only), None) = (chars.next(), chars.next()) {
         return char_keysym(only).ok_or_else(|| format!("{name:?} is not a key"));
@@ -84,7 +84,7 @@ pub fn key_keysym(name: &str) -> Result<u32, String> {
 }
 
 /// Keysym for a modifier name such as `ctrl` or `cmd`.
-pub fn modifier_keysym(name: &str) -> Result<u32, String> {
+pub(crate) fn modifier_keysym(name: &str) -> Result<u32, String> {
     let lower = name.trim().to_lowercase();
     MODIFIERS
         .iter()
@@ -97,14 +97,14 @@ pub fn modifier_keysym(name: &str) -> Result<u32, String> {
 
 /// A key to press, and whether Shift must be held with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeyPress {
-    pub keycode: u8,
-    pub shift: bool,
+pub(crate) struct KeyPress {
+    pub(crate) keycode: u8,
+    pub(crate) shift: bool,
 }
 
 /// The server's keyboard mapping: the keysyms of each keycode, level by level.
 #[derive(Debug, Clone)]
-pub struct Keymap {
+pub(crate) struct Keymap {
     first_keycode: u8,
     per_keycode: usize,
     keysyms: Vec<u32>,
@@ -112,7 +112,7 @@ pub struct Keymap {
 
 impl Keymap {
     /// `keysyms` holds `per_keycode` entries for each keycode from `first_keycode` on.
-    pub fn new(first_keycode: u8, per_keycode: u8, keysyms: Vec<u32>) -> Self {
+    pub(crate) fn new(first_keycode: u8, per_keycode: u8, keysyms: Vec<u32>) -> Self {
         Self {
             first_keycode,
             per_keycode: usize::from(per_keycode.max(1)),
@@ -132,7 +132,7 @@ impl Keymap {
 
     /// The key that produces `keysym` unshifted, or else with Shift. Keys that need
     /// `AltGr` or another group are not used.
-    pub fn find(&self, keysym: u32) -> Option<KeyPress> {
+    pub(crate) fn find(&self, keysym: u32) -> Option<KeyPress> {
         for (level, shift) in [(0, false), (1, true)] {
             if let Some((keycode, _)) = self.rows().find(|(_, row)| row.get(level) == Some(&keysym))
             {
@@ -143,7 +143,7 @@ impl Keymap {
     }
 
     /// Keycodes with no keysyms, highest first. They are free to bind temporarily.
-    pub fn spares(&self) -> Vec<u8> {
+    fn spares(&self) -> Vec<u8> {
         let mut spares: Vec<u8> = self
             .rows()
             .filter(|(_, row)| row.iter().all(|keysym| *keysym == 0))
@@ -159,7 +159,7 @@ const MAX_BINDINGS: usize = 32;
 
 /// How to produce one keysym.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tap {
+pub(crate) enum Tap {
     /// A key the keyboard already has.
     Key(KeyPress),
     /// A spare keycode bound to the keysym for the length of its segment.
@@ -168,18 +168,18 @@ pub enum Tap {
 
 /// Keysyms typed under one set of temporary bindings.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub struct Segment {
-    pub bindings: Vec<(u8, u32)>,
-    pub taps: Vec<Tap>,
+pub(crate) struct Segment {
+    pub(crate) bindings: Vec<(u8, u32)>,
+    pub(crate) taps: Vec<Tap>,
 }
 
 /// The keyboard has no spare keycode to type a character with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("the keyboard has no free key to type characters it lacks")]
-pub struct NoSpareKey;
+pub(crate) struct NoSpareKey;
 
 /// Splits `keysyms` into segments, each needing at most [`MAX_BINDINGS`] temporary bindings.
-pub fn segments(keymap: &Keymap, keysyms: &[u32]) -> Result<Vec<Segment>, NoSpareKey> {
+pub(crate) fn segments(keymap: &Keymap, keysyms: &[u32]) -> Result<Vec<Segment>, NoSpareKey> {
     let mut spares = keymap.spares();
     spares.truncate(MAX_BINDINGS);
     let mut done = Vec::new();

@@ -3,7 +3,7 @@
 use std::{io, ptr::NonNull};
 
 /// A shared memory segment attached to this process.
-pub struct Segment {
+pub(crate) struct Segment {
     id: i32,
     ptr: NonNull<u8>,
     len: usize,
@@ -20,7 +20,7 @@ unsafe impl Sync for Segment {}
 
 impl Segment {
     /// Creates a private segment of `len` bytes and attaches it.
-    pub fn new(len: usize) -> io::Result<Self> {
+    pub(crate) fn new(len: usize) -> io::Result<Self> {
         // SAFETY: shmget takes plain integers and returns an id or -1.
         let id = unsafe { libc::shmget(libc::IPC_PRIVATE, len, libc::IPC_CREAT | 0o600) };
         if id < 0 {
@@ -39,12 +39,12 @@ impl Segment {
     }
 
     /// The id the X server needs to attach the segment.
-    pub fn id(&self) -> u32 {
+    pub(crate) fn id(&self) -> u32 {
         u32::try_from(self.id).expect("shmget returns a non-negative id")
     }
 
     /// Deletes the segment once every process has detached. Call after the X server attached.
-    pub fn remove_on_detach(&self) -> io::Result<()> {
+    pub(crate) fn remove_on_detach(&self) -> io::Result<()> {
         // SAFETY: `self.id` is a valid segment id; IPC_RMID ignores the buffer argument.
         let result = unsafe { libc::shmctl(self.id, libc::IPC_RMID, std::ptr::null_mut()) };
         if result < 0 {
@@ -56,7 +56,7 @@ impl Segment {
 
     /// The segment contents. The X server only writes during a request that the
     /// caller makes, and the caller holds `&mut self` while it does.
-    pub fn bytes(&mut self) -> &[u8] {
+    pub(crate) fn bytes(&mut self) -> &[u8] {
         // SAFETY: `ptr` points to `len` attached bytes that stay mapped until drop.
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }

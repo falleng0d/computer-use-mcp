@@ -12,7 +12,7 @@ const SHOW_BACKLOG: usize = 16;
 
 /// Who is watching the computer, and the channels that tell viewer pages what changed.
 #[derive(Clone)]
-pub struct Hub(Arc<Inner>);
+pub(crate) struct Hub(Arc<Inner>);
 
 struct Inner {
     host_base: u16,
@@ -32,7 +32,7 @@ struct Viewers {
 
 impl Hub {
     /// `host_base` is the host port the viewer page is published on. Raw VNC for screen N is on `host_base + N`.
-    pub fn new(host_base: u16) -> Self {
+    pub(crate) fn new(host_base: u16) -> Self {
         Self(Arc::new(Inner {
             host_base,
             viewers: Mutex::default(),
@@ -42,11 +42,11 @@ impl Hub {
         }))
     }
 
-    pub fn host_base(&self) -> u16 {
+    pub(crate) fn host_base(&self) -> u16 {
         self.0.host_base
     }
 
-    pub fn host_vnc_port(&self, screen: u8) -> u16 {
+    pub(crate) fn host_vnc_port(&self, screen: u8) -> u16 {
         self.0.host_base + u16::from(screen)
     }
 
@@ -58,14 +58,14 @@ impl Hub {
     }
 
     /// Viewers attached to `screen`, browser or native.
-    pub fn viewers(&self, screen: u8) -> usize {
+    pub(crate) fn viewers(&self, screen: u8) -> usize {
         self.counts().counts.get(&screen).copied().unwrap_or(0)
     }
 
     /// Counts a viewer on `screen` until the guard drops.
     ///
     /// Returns `None` when the screen's session has ended.
-    pub fn attach(&self, screen: u8) -> Option<ViewerGuard> {
+    pub(crate) fn attach(&self, screen: u8) -> Option<ViewerGuard> {
         {
             let mut viewers = self.counts();
             if viewers.ended.contains(&screen) {
@@ -81,49 +81,49 @@ impl Hub {
     }
 
     /// Stops new viewers on `screen` because its session ended. Returns true while a viewer is attached.
-    pub fn end_screen(&self, screen: u8) -> bool {
+    pub(crate) fn end_screen(&self, screen: u8) -> bool {
         let mut viewers = self.counts();
         viewers.ended.insert(screen);
         viewers.counts.contains_key(&screen)
     }
 
     /// Accepts viewers on `screen` again, once a new session owns it.
-    pub fn reopen_screen(&self, screen: u8) {
+    pub(crate) fn reopen_screen(&self, screen: u8) {
         self.counts().ended.remove(&screen);
     }
 
     /// Counts an open viewer page until the guard drops.
-    pub fn attach_page(&self) -> PageGuard {
+    pub(crate) fn attach_page(&self) -> PageGuard {
         self.0.pages.fetch_add(1, Ordering::SeqCst);
         PageGuard(self.clone())
     }
 
     /// Viewer pages open now.
-    pub fn pages(&self) -> usize {
+    pub(crate) fn pages(&self) -> usize {
         self.0.pages.load(Ordering::SeqCst)
     }
 
     /// Tells pages that the sessions or viewer counts changed.
-    pub fn notify(&self) {
+    pub(crate) fn notify(&self) {
         self.0.changed.send_modify(|version| *version += 1);
     }
 
-    pub fn subscribe_changes(&self) -> watch::Receiver<u64> {
+    pub(crate) fn subscribe_changes(&self) -> watch::Receiver<u64> {
         self.0.changed.subscribe()
     }
 
     /// Asks every open page to switch to `screen` and returns how many pages are open.
-    pub fn show(&self, screen: u8) -> usize {
+    pub(crate) fn show(&self, screen: u8) -> usize {
         let _ = self.0.show.send(screen);
         self.pages()
     }
 
-    pub fn subscribe_show(&self) -> broadcast::Receiver<u8> {
+    pub(crate) fn subscribe_show(&self) -> broadcast::Receiver<u8> {
         self.0.show.subscribe()
     }
 
     /// Waits until no viewer is attached to `screen`.
-    pub async fn detached(&self, screen: u8) {
+    pub(crate) async fn detached(&self, screen: u8) {
         let mut changes = self.subscribe_changes();
         while self.viewers(screen) > 0 {
             if changes.changed().await.is_err() {
@@ -133,7 +133,7 @@ impl Hub {
     }
 }
 
-pub struct ViewerGuard {
+pub(crate) struct ViewerGuard {
     hub: Hub,
     screen: u8,
 }
@@ -152,7 +152,7 @@ impl Drop for ViewerGuard {
     }
 }
 
-pub struct PageGuard(Hub);
+pub(crate) struct PageGuard(Hub);
 
 impl Drop for PageGuard {
     fn drop(&mut self) {

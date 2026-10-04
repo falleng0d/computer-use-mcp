@@ -4,11 +4,11 @@ use computer_protocol::OWNER_TIMEOUT_SECS;
 use tokio::time::Instant;
 
 /// How long an owner may stay silent before its sessions end.
-pub const OWNER_TIMEOUT: Duration = Duration::from_secs(OWNER_TIMEOUT_SECS);
+const OWNER_TIMEOUT: Duration = Duration::from_secs(OWNER_TIMEOUT_SECS);
 
 /// Why a session ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EndReason {
+pub(crate) enum EndReason {
     /// The agent called `end_session`.
     Agent,
     /// The owner told `computerd` it is shutting down.
@@ -21,7 +21,7 @@ pub enum EndReason {
 
 impl EndReason {
     /// Short label for logs.
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Agent => "ended by agent",
             Self::OwnerLeft => "owner left",
@@ -59,17 +59,17 @@ fn human(duration: Duration) -> String {
 
 /// What the end decision of one session depends on.
 #[derive(Debug, Clone, Copy)]
-pub struct Liveness {
-    pub now: Instant,
-    pub created: Instant,
-    pub last_activity: Instant,
+pub(crate) struct Liveness {
+    pub(crate) now: Instant,
+    pub(crate) created: Instant,
+    pub(crate) last_activity: Instant,
     /// Time of the owner's last heartbeat, `None` when it never sent one.
-    pub owner_seen: Option<Instant>,
-    pub idle: Duration,
+    pub(crate) owner_seen: Option<Instant>,
+    pub(crate) idle: Duration,
     /// An agent call is running on the session.
-    pub call_running: bool,
+    pub(crate) call_running: bool,
     /// Viewers attached to the session's screen.
-    pub viewers: usize,
+    pub(crate) viewers: usize,
 }
 
 /// Decides whether a session ends now.
@@ -77,7 +77,7 @@ pub struct Liveness {
 /// A silent owner ends the session even while a call runs. A running call counts as
 /// activity, so a long command never makes its own session idle. An attached viewer does
 /// too, so a session someone watches never ends for being idle.
-pub fn end_reason(l: &Liveness) -> Option<EndReason> {
+pub(crate) fn end_reason(l: &Liveness) -> Option<EndReason> {
     let owner_last = l.owner_seen.map_or(l.created, |seen| seen.max(l.created));
     if l.now.saturating_duration_since(owner_last) >= OWNER_TIMEOUT {
         return Some(EndReason::OwnerGone);

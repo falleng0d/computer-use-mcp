@@ -44,15 +44,15 @@ const GROUPS: [&[&str]; 4] = [
 ];
 
 /// What each group of a scratch profile held right after the clone.
-pub type Baseline = BTreeMap<usize, u64>;
+pub(crate) type Baseline = BTreeMap<usize, u64>;
 
 /// Folder of the template profile that every new browser starts from.
-pub fn template_dir(home: &Path) -> PathBuf {
+pub(crate) fn template_dir(home: &Path) -> PathBuf {
     home.join(TEMPLATE_DIR)
 }
 
 /// Folder the Chromium of screen `number` runs its profile in. It starts fresh every time.
-pub fn scratch_dir(number: u8) -> PathBuf {
+pub(crate) fn scratch_dir(number: u8) -> PathBuf {
     Path::new(SCRATCH_DIR).join(format!("screen-{number}"))
 }
 
@@ -156,7 +156,7 @@ fn ensure_template(home: &Path) -> io::Result<()> {
 }
 
 /// Fills a scratch profile with the template's shared files.
-pub fn clone_template(home: &Path, scratch: &Path) -> io::Result<Baseline> {
+pub(crate) fn clone_template(home: &Path, scratch: &Path) -> io::Result<Baseline> {
     ensure_template(home)?;
     let template = template_dir(home);
     let mut baseline = Baseline::new();
@@ -172,7 +172,7 @@ pub fn clone_template(home: &Path, scratch: &Path) -> io::Result<Baseline> {
 /// A file the browser did not change stays as the template has it, so a browser that was open
 /// for a long time does not undo a newer change. A file that two browsers both changed goes to
 /// whichever closes last.
-pub fn save_to_template(
+pub(crate) fn save_to_template(
     home: &Path,
     scratch: &Path,
     number: u8,
@@ -189,7 +189,7 @@ pub fn save_to_template(
 
 /// Deletes a scratch profile. Chromium's helper processes may still write into it for a moment
 /// after the browser exits, so a failed delete is retried.
-pub fn discard(scratch: &Path) {
+pub(crate) fn discard(scratch: &Path) {
     for _ in 0..DISCARD_TRIES {
         match std::fs::remove_dir_all(scratch) {
             Ok(()) => return,

@@ -12,7 +12,7 @@ const EXPIRY_CAP_SECS: f64 = 400.0 * 86_400.0;
 /// How far below the cap an expiry may sit and still count as capped.
 const EXPIRY_CAP_SLACK_SECS: f64 = 2.0 * 86_400.0;
 /// How long the jar remembers that a cookie was deleted.
-pub const TOMBSTONE_TTL_SECS: f64 = 30.0 * 86_400.0;
+const TOMBSTONE_TTL_SECS: f64 = 30.0 * 86_400.0;
 /// The most entries the jar keeps. The oldest changes go first.
 const MAX_ENTRIES: usize = 5000;
 const JAR_VERSION: u32 = 1;
@@ -34,7 +34,7 @@ const DELETE_EXPIRES: f64 = 1.0;
 
 /// Identity of a cookie. A value change keeps the key, a new partition makes a new cookie.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Key {
+pub(crate) struct Key {
     name: String,
     domain: String,
     path: String,
@@ -43,7 +43,7 @@ pub struct Key {
 
 impl Key {
     /// The key of a `DevTools` cookie, or `None` when it lacks a name, domain, or path.
-    pub fn of(cookie: &Value) -> Option<Self> {
+    fn of(cookie: &Value) -> Option<Self> {
         let text = |field: &str| cookie.get(field)?.as_str().map(str::to_owned);
         Some(Self {
             name: text("name")?,
@@ -58,12 +58,12 @@ impl Key {
 }
 
 /// The cookies one browser held at its last read, by key.
-pub type Snapshot = BTreeMap<Key, Value>;
+pub(crate) type Snapshot = BTreeMap<Key, Value>;
 
 /// Keeps the cookies that can move between browsers.
 ///
 /// Cookies with an opaque partition cannot be recreated, so they stay where they are.
-pub fn snapshot(cookies: Vec<Value>) -> Snapshot {
+pub(crate) fn snapshot(cookies: Vec<Value>) -> Snapshot {
     cookies
         .into_iter()
         .filter(|cookie| cookie.get("partitionKeyOpaque").and_then(Value::as_bool) != Some(true))
@@ -84,7 +84,7 @@ fn is_expired(cookie: &Value, now: f64) -> bool {
 }
 
 /// Whether two cookies are the same for syncing. Expiries that both sit at the cap are equal.
-pub fn same(a: &Value, b: &Value, now: f64) -> bool {
+fn same(a: &Value, b: &Value, now: f64) -> bool {
     let (left, right) = (expires(a), expires(b));
     let cap = now + EXPIRY_CAP_SECS - EXPIRY_CAP_SLACK_SECS;
     let same_expiry = (left - right).abs() < 1.0 || (left >= cap && right >= cap);
@@ -101,15 +101,15 @@ pub fn same(a: &Value, b: &Value, now: f64) -> bool {
 
 /// What changed in one browser between two reads.
 #[derive(Debug, Default, PartialEq)]
-pub struct Changes {
+pub(crate) struct Changes {
     /// Cookies that are new or have a new value.
-    pub upserts: Vec<Value>,
+    upserts: Vec<Value>,
     /// Cookies the user or a page deleted, as the browser last held them.
-    pub removed: Vec<Value>,
+    removed: Vec<Value>,
 }
 
 impl Changes {
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.upserts.len() + self.removed.len()
     }
 }
@@ -117,7 +117,7 @@ impl Changes {
 /// Compares a browser's `now_cookies` with its `previous` snapshot.
 ///
 /// A cookie that vanished after its expiry passed expired on its own, which is not a deletion.
-pub fn diff(previous: &Snapshot, now_cookies: &Snapshot, now: f64) -> Changes {
+pub(crate) fn diff(previous: &Snapshot, now_cookies: &Snapshot, now: f64) -> Changes {
     let mut changes = Changes::default();
     for (key, cookie) in now_cookies {
         if previous
@@ -138,7 +138,7 @@ pub fn diff(previous: &Snapshot, now_cookies: &Snapshot, now: f64) -> Changes {
 /// What a page changed in a browser between a read and the read after a push of `pushed`.
 ///
 /// The push itself is not a change, but a different value for a pushed cookie is.
-pub fn changes_after_push(
+pub(crate) fn changes_after_push(
     before: &Snapshot,
     after: &Snapshot,
     pushed: &Pending,
@@ -161,7 +161,7 @@ pub fn changes_after_push(
 }
 
 /// The `Storage.setCookies` parameter that writes `cookie`.
-pub fn to_param(cookie: &Value) -> Value {
+pub(crate) fn to_param(cookie: &Value) -> Value {
     let mut param = Map::new();
     for field in PARAM_FIELDS {
         if let Some(value) = cookie.get(field) {
@@ -179,7 +179,7 @@ pub fn to_param(cookie: &Value) -> Value {
 }
 
 /// The `Storage.setCookies` parameter that deletes `cookie`.
-pub fn to_delete_param(cookie: &Value) -> Value {
+pub(crate) fn to_delete_param(cookie: &Value) -> Value {
     let mut param = to_param(cookie);
     if let Some(fields) = param.as_object_mut() {
         fields.insert("expires".to_owned(), DELETE_EXPIRES.into());
@@ -202,20 +202,20 @@ struct File {
 
 /// What a browser must receive to match the jar.
 #[derive(Debug, Default, PartialEq)]
-pub struct Pending {
-    pub set: Vec<Value>,
-    pub delete: Vec<Value>,
+pub(crate) struct Pending {
+    pub(crate) set: Vec<Value>,
+    pub(crate) delete: Vec<Value>,
 }
 
 impl Pending {
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.set.len() + self.delete.len()
     }
 }
 
 /// Every cookie the browsers share, with a mark for each deletion.
 #[derive(Debug, Default)]
-pub struct Jar {
+pub(crate) struct Jar {
     entries: BTreeMap<Key, Entry>,
     dirty: bool,
 }
@@ -226,7 +226,7 @@ impl Jar {
     /// # Errors
     ///
     /// Fails when the text is not a jar of a known version.
-    pub fn from_json(text: &str) -> Result<Self, String> {
+    pub(crate) fn from_json(text: &str) -> Result<Self, String> {
         let file: File = serde_json::from_str(text).map_err(|error| error.to_string())?;
         if file.version != JAR_VERSION {
             return Err(format!("unknown cookie jar version {}", file.version));
@@ -243,7 +243,7 @@ impl Jar {
     }
 
     /// The jar as the text saved in home.
-    pub fn to_json(&self) -> String {
+    fn to_json(&self) -> String {
         let file = File {
             version: JAR_VERSION,
             entries: self.entries.values().cloned().collect(),
@@ -253,7 +253,7 @@ impl Jar {
 
     /// The text to save, or `None` when nothing changed. Call [`Jar::mark_unsaved`] when the
     /// write fails.
-    pub fn take_unsaved(&mut self, now: f64) -> Option<String> {
+    pub(crate) fn take_unsaved(&mut self, now: f64) -> Option<String> {
         self.prune(now);
         if !self.dirty {
             return None;
@@ -262,12 +262,12 @@ impl Jar {
         Some(self.to_json())
     }
 
-    pub fn mark_unsaved(&mut self) {
+    pub(crate) fn mark_unsaved(&mut self) {
         self.dirty = true;
     }
 
     /// Folds the changes one browser made at time `at` into the jar. The newest change wins.
-    pub fn apply(&mut self, changes: &Changes, at: f64) {
+    pub(crate) fn apply(&mut self, changes: &Changes, at: f64) {
         for cookie in &changes.upserts {
             self.put(cookie, at, false);
         }
@@ -298,7 +298,7 @@ impl Jar {
     }
 
     /// Drops cookies that expired and deletion marks that are old enough to forget.
-    pub fn prune(&mut self, now: f64) {
+    pub(crate) fn prune(&mut self, now: f64) {
         let before = self.entries.len();
         self.entries.retain(|_, entry| {
             if entry.deleted {
@@ -330,7 +330,7 @@ impl Jar {
     }
 
     /// What a browser holding `snapshot` needs to match the jar.
-    pub fn pending(&self, snapshot: &Snapshot, now: f64) -> Pending {
+    pub(crate) fn pending(&self, snapshot: &Snapshot, now: f64) -> Pending {
         let mut pending = Pending::default();
         for (key, entry) in &self.entries {
             let held = snapshot.get(key);
@@ -348,7 +348,7 @@ impl Jar {
     }
 
     /// The cookies a new browser starts with.
-    pub fn live(&self, now: f64) -> Vec<Value> {
+    pub(crate) fn live(&self, now: f64) -> Vec<Value> {
         self.entries
             .values()
             .filter(|entry| !entry.deleted && !is_expired(&entry.cookie, now))

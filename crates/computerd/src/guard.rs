@@ -3,11 +3,11 @@
 use computer_protocol::Action;
 
 /// Identical batches that may leave the screen unchanged in a row. The next one is refused.
-pub const MAX_UNCHANGED_REPEATS: u8 = 3;
+const MAX_UNCHANGED_REPEATS: u8 = 3;
 
 /// What a finished batch did to the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
+pub(crate) enum Outcome {
     Changed,
     Unchanged,
     /// The batch ended without a screenshot, so the effect is not known.
@@ -16,7 +16,7 @@ pub enum Outcome {
 
 /// Counts identical batches that left the frame unchanged.
 #[derive(Debug, Default)]
-pub struct LoopGuard {
+pub(crate) struct LoopGuard {
     last: Vec<Action>,
     unchanged: u8,
     /// Id of the frame the last counted batch left unchanged.
@@ -37,7 +37,7 @@ fn is_countable(batch: &[Action]) -> bool {
 
 impl LoopGuard {
     /// Forgets the count when the screen changed on its own since the last batch.
-    pub fn sync(&mut self, frame: u64) {
+    pub(crate) fn sync(&mut self, frame: u64) {
         if self.frame != Some(frame) {
             self.reset();
         }
@@ -45,13 +45,13 @@ impl LoopGuard {
 
     /// Whether `batch` is the one repeated [`MAX_UNCHANGED_REPEATS`] times already.
     /// Returns how many times it ran when it must be refused.
-    pub fn refusal(&self, batch: &[Action]) -> Option<u8> {
+    pub(crate) fn refusal(&self, batch: &[Action]) -> Option<u8> {
         (is_countable(batch) && self.unchanged >= MAX_UNCHANGED_REPEATS && self.last == batch)
             .then_some(self.unchanged)
     }
 
     /// Records a batch that ran.
-    pub fn record(&mut self, batch: &[Action], outcome: Outcome, frame: u64) {
+    pub(crate) fn record(&mut self, batch: &[Action], outcome: Outcome, frame: u64) {
         self.frame = Some(frame);
         if outcome != Outcome::Unchanged || !is_countable(batch) {
             self.reset();
@@ -64,7 +64,7 @@ impl LoopGuard {
     }
 
     /// Forgets the count, for example after a failed batch.
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.last.clear();
         self.unchanged = 0;
         self.frame = None;

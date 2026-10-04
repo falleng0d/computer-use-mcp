@@ -45,7 +45,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// Why a call on a session failed.
 #[derive(Debug, thiserror::Error)]
-pub enum SessionError {
+pub(crate) enum SessionError {
     #[error("unknown session")]
     Unknown,
     #[error("this session ended because {0}")]
@@ -61,15 +61,15 @@ pub enum SessionError {
 
 /// One session as the viewer page lists it.
 #[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct SessionView {
+pub(crate) struct SessionView {
     /// First 8 characters of the session id, enough to tell sessions apart on the page.
-    pub id: String,
-    pub title: String,
-    pub screen: Option<u8>,
+    id: String,
+    title: String,
+    screen: Option<u8>,
     /// Start time in seconds since the Unix epoch.
-    pub started: u64,
+    started: u64,
     /// Viewers attached to the session's screen.
-    pub viewers: usize,
+    viewers: usize,
 }
 
 struct Session {
@@ -171,7 +171,7 @@ impl Slot {
 
 /// Every session of the computer and the screens they own.
 #[derive(Clone)]
-pub struct Sessions {
+pub(crate) struct Sessions {
     map: Arc<Mutex<HashMap<SessionId, Arc<Session>>>>,
     /// Time of each owner's last heartbeat. Only owners with sessions are kept.
     owners: Arc<Mutex<HashMap<OwnerId, Instant>>>,
@@ -192,7 +192,7 @@ impl Default for Sessions {
 }
 
 impl Sessions {
-    pub fn new(hub: Hub) -> Self {
+    pub(crate) fn new(hub: Hub) -> Self {
         Self {
             map: Arc::default(),
             owners: Arc::default(),
@@ -205,12 +205,12 @@ impl Sessions {
         }
     }
 
-    pub fn hub(&self) -> Hub {
+    pub(crate) fn hub(&self) -> Hub {
         self.hub.clone()
     }
 
     /// The sessions the viewer page lists, oldest first.
-    pub fn views(&self) -> Vec<SessionView> {
+    pub(crate) fn views(&self) -> Vec<SessionView> {
         let mut views: Vec<_> = self
             .lock()
             .iter()
@@ -229,7 +229,7 @@ impl Sessions {
         views
     }
 
-    pub fn insert(&self, id: SessionId, request: CreateSession) {
+    pub(crate) fn insert(&self, id: SessionId, request: CreateSession) {
         let idle = Duration::from_secs(u64::from(request.idle_secs.get()));
         info!(
             session = %id,
@@ -292,7 +292,7 @@ impl Sessions {
     }
 
     /// Records a heartbeat for every session of `owner`.
-    pub fn heartbeat(&self, owner: &OwnerId) {
+    pub(crate) fn heartbeat(&self, owner: &OwnerId) {
         let has_sessions = self.lock().values().any(|s| s.owner == *owner);
         if has_sessions {
             lock(&self.owners).insert(owner.clone(), Instant::now());
@@ -300,7 +300,7 @@ impl Sessions {
     }
 
     /// Ends a session on the agent's request.
-    pub async fn end(&self, id: &SessionId) -> Result<(), SessionError> {
+    pub(crate) async fn end(&self, id: &SessionId) -> Result<(), SessionError> {
         let removed = self.lock().remove(id);
         let session = removed.ok_or_else(|| self.missing(id))?;
         if let Some(closed) = self.finish(id, session, EndReason::Agent) {
@@ -312,7 +312,7 @@ impl Sessions {
     /// Ends every session of `owner` and returns how many there were.
     ///
     /// The sessions are ended even when the caller stops waiting for their screens to close.
-    pub async fn end_owner(&self, owner: &OwnerId) -> usize {
+    pub(crate) async fn end_owner(&self, owner: &OwnerId) -> usize {
         let ending: Vec<_> = {
             let mut map = self.lock();
             let ids: Vec<_> = map
@@ -367,7 +367,7 @@ impl Sessions {
     }
 
     /// Checks every second which sessions are due to end, until `stop` is cancelled.
-    pub async fn reap_until(&self, stop: CancellationToken) {
+    pub(crate) async fn reap_until(&self, stop: CancellationToken) {
         let mut tick = tokio::time::interval(REAP_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -420,7 +420,7 @@ impl Sessions {
     /// Captures the session's screen, opening it first when this is the session's first call.
     ///
     /// A screen that died or hung is closed and reopened by the next call.
-    pub async fn observe(&self, id: &SessionId) -> Result<Observation, SessionError> {
+    pub(crate) async fn observe(&self, id: &SessionId) -> Result<Observation, SessionError> {
         let (mut observation, opened_screen) = self
             .with_screen(id, OBSERVE_TIMEOUT, async |screen| {
                 Ok(screen.observe().await?)
@@ -433,7 +433,11 @@ impl Sessions {
     /// Runs a batch of actions on the session's screen, opening it first when needed.
     ///
     /// Batches of one session run one at a time, in the order they arrive.
-    pub async fn act(&self, id: &SessionId, request: ActRequest) -> Result<ActReply, SessionError> {
+    pub(crate) async fn act(
+        &self,
+        id: &SessionId,
+        request: ActRequest,
+    ) -> Result<ActReply, SessionError> {
         let budget = request.time_budget();
         let cwd = self.cwd_of(id)?;
         let (mut reply, opened_screen) = self
@@ -448,7 +452,7 @@ impl Sessions {
     }
 
     /// Opens a file or an http(s) URL on the session's screen, opening the screen first when needed.
-    pub async fn open_path(
+    pub(crate) async fn open_path(
         &self,
         id: &SessionId,
         request: OpenPathRequest,
@@ -464,7 +468,7 @@ impl Sessions {
     }
 
     /// Starts or raises an application on the session's screen, opening the screen first when needed.
-    pub async fn launch_app(
+    pub(crate) async fn launch_app(
         &self,
         id: &SessionId,
         request: LaunchAppRequest,
@@ -482,7 +486,11 @@ impl Sessions {
     }
 
     /// Shows the browser of an open screen, starting it when it is not running.
-    pub async fn show_browser(&self, screen: u8, url: Option<String>) -> Result<(), SessionError> {
+    pub(crate) async fn show_browser(
+        &self,
+        screen: u8,
+        url: Option<String>,
+    ) -> Result<(), SessionError> {
         let id = self
             .lock()
             .iter()
@@ -566,7 +574,7 @@ impl Sessions {
     /// Runs a shell command in the session's working folder.
     ///
     /// Never waits for the screen lock, and any number of commands of a session may run at once.
-    pub async fn shell(
+    pub(crate) async fn shell(
         &self,
         id: &SessionId,
         request: ShellRequest,
@@ -584,7 +592,7 @@ impl Sessions {
     }
 
     /// Changes the session's working folder and returns its absolute path.
-    pub async fn set_cwd(
+    pub(crate) async fn set_cwd(
         &self,
         id: &SessionId,
         request: SetCwdRequest,
@@ -602,7 +610,7 @@ impl Sessions {
     }
 
     /// Lists a folder. A relative path starts at the session's working folder.
-    pub async fn list_files(
+    pub(crate) async fn list_files(
         &self,
         id: &SessionId,
         request: ListFilesRequest,
@@ -614,7 +622,7 @@ impl Sessions {
     }
 
     /// Reads a text file or an image. A relative path starts at the session's working folder.
-    pub async fn read_file(
+    pub(crate) async fn read_file(
         &self,
         id: &SessionId,
         request: ReadFileRequest,
@@ -626,7 +634,7 @@ impl Sessions {
     }
 
     /// Writes a text file. A relative path starts at the session's working folder.
-    pub async fn write_file(
+    pub(crate) async fn write_file(
         &self,
         id: &SessionId,
         request: WriteFileRequest,
@@ -638,12 +646,12 @@ impl Sessions {
     }
 
     /// Kills every running command and refuses new ones. Called when `computerd` starts to shut down.
-    pub fn cancel_all(&self) {
+    pub(crate) fn cancel_all(&self) {
         self.shutdown.cancel();
     }
 
     /// Closes every screen and waits for the closes of sessions that ended earlier. Called when `computerd` shuts down.
-    pub async fn close_all(&self) {
+    pub(crate) async fn close_all(&self) {
         self.shutdown.cancel();
         let sessions: Vec<Arc<Session>> = self.lock().drain().map(|(_, session)| session).collect();
         for session in sessions {

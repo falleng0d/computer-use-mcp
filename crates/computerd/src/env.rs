@@ -1,10 +1,10 @@
 //! The environment of processes `computerd` starts for a screen.
 
 const DEFAULT_USER: &str = "computer";
-pub const SHELL: &str = "/bin/bash";
+pub(crate) const SHELL: &str = "/bin/bash";
 
 /// Environment of a command: a few variables taken from the daemon's own, never its secrets.
-pub fn environment(
+fn environment(
     parent: impl Fn(&str) -> Option<String>,
     display: Option<u8>,
 ) -> Vec<(&'static str, String)> {
@@ -31,7 +31,7 @@ pub fn environment(
 }
 
 /// [`environment`] taken from the daemon's own variables.
-pub fn from_process(display: Option<u8>) -> Vec<(&'static str, String)> {
+pub(crate) fn from_process(display: Option<u8>) -> Vec<(&'static str, String)> {
     environment(|name| std::env::var(name).ok(), display)
 }
 

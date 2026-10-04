@@ -28,13 +28,13 @@ const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_CHUNK: usize = 8192;
 
 /// One command to run.
-pub struct Job {
-    pub command: String,
-    pub cwd: PathBuf,
-    pub display: Option<u8>,
-    pub timeout: Duration,
+pub(crate) struct Job {
+    pub(crate) command: String,
+    pub(crate) cwd: PathBuf,
+    pub(crate) display: Option<u8>,
+    pub(crate) timeout: Duration,
     /// Kills the command when cancelled.
-    pub cancel: CancellationToken,
+    pub(crate) cancel: CancellationToken,
 }
 
 /// Kills the process group when dropped while armed, so a dropped call leaves nothing running.
@@ -75,7 +75,7 @@ async fn pump(mut stream: impl AsyncRead + Unpin, capture: &mut Capture) {
 /// # Errors
 ///
 /// Fails when the shell cannot be started. A command that fails or times out is a normal reply.
-pub async fn run(job: Job) -> anyhow::Result<ShellReply> {
+pub(crate) async fn run(job: Job) -> anyhow::Result<ShellReply> {
     let started = Instant::now();
     let mut command = Command::new(SHELL);
     command

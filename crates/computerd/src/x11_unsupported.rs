@@ -7,50 +7,50 @@ use computer_protocol::{Cursor, ScreenSize};
 
 use crate::plan::{Input, WindowInfo};
 
-pub struct Capturer;
+pub(crate) struct Capturer;
 
 impl Capturer {
-    pub fn connect(_display: &str, _size: ScreenSize) -> Result<Self> {
+    pub(crate) fn connect(_display: &str, _size: ScreenSize) -> Result<Self> {
         bail!("screens need Linux")
     }
 
-    pub fn window_manager_ready(&self) -> Result<bool> {
+    pub(crate) fn window_manager_ready(&self) -> Result<bool> {
         bail!("screens need Linux")
     }
 
-    pub fn take_damage(&self) -> Result<bool> {
+    pub(crate) fn take_damage(&self) -> Result<bool> {
         bail!("screens need Linux")
     }
 
-    pub fn cursor(&self) -> Result<Cursor> {
+    pub(crate) fn cursor(&self) -> Result<Cursor> {
         bail!("screens need Linux")
     }
 
-    pub fn active_window_title(&self) -> String {
+    pub(crate) fn active_window_title(&self) -> String {
         String::new()
     }
 
-    pub fn grab(&mut self) -> Result<&[u8]> {
+    pub(crate) fn grab(&mut self) -> Result<&[u8]> {
         bail!("screens need Linux")
     }
 
-    pub fn perform(&self, _input: &Input) -> Result<()> {
+    pub(crate) fn perform(&self, _input: &Input) -> Result<()> {
         bail!("screens need Linux")
     }
 
-    pub fn check_keys(&self, _inputs: &[Input]) -> Result<()> {
+    pub(crate) fn check_keys(&self, _inputs: &[Input]) -> Result<()> {
         bail!("screens need Linux")
     }
 
-    pub fn release_held(&self) -> Result<()> {
+    pub(crate) fn release_held(&self) -> Result<()> {
         bail!("screens need Linux")
     }
 
-    pub fn windows(&self) -> Result<Vec<WindowInfo>> {
+    pub(crate) fn windows(&self) -> Result<Vec<WindowInfo>> {
         bail!("screens need Linux")
     }
 
-    pub fn activate(&self, _window: u32) -> Result<()> {
+    pub(crate) fn activate(&self, _window: u32) -> Result<()> {
         bail!("screens need Linux")
     }
 }

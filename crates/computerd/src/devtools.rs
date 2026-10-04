@@ -19,7 +19,7 @@ const PAGE_POLL: Duration = Duration::from_millis(100);
 const MAX_HTTP_BYTES: u64 = 1 << 20;
 
 /// One `DevTools` WebSocket, used for one request at a time.
-pub struct Connection {
+pub(crate) struct Connection {
     socket: WebSocketStream<TcpStream>,
     next_id: u64,
 }
@@ -68,7 +68,7 @@ async fn http_get(port: u16, path: &str) -> Result<Value> {
 
 impl Connection {
     /// Connects to the browser target of the Chromium on `port`.
-    pub async fn browser(port: u16) -> Result<Self> {
+    pub(crate) async fn browser(port: u16) -> Result<Self> {
         let version = http_get(port, "/json/version").await?;
         let url = version
             .get("webSocketDebuggerUrl")
@@ -91,7 +91,7 @@ impl Connection {
     }
 
     /// Calls `method` and returns its result. Events that arrive meanwhile are skipped.
-    pub async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+    async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
         self.next_id += 1;
         let id = self.next_id;
         let body = json!({"id": id, "method": method, "params": params}).to_string();
@@ -126,7 +126,7 @@ impl Connection {
     }
 
     /// Every cookie of the default browser context.
-    pub async fn get_cookies(&mut self) -> Result<Vec<Value>> {
+    pub(crate) async fn get_cookies(&mut self) -> Result<Vec<Value>> {
         let result = self.call("Storage.getCookies", json!({})).await?;
         Ok(result
             .get("cookies")
@@ -136,7 +136,7 @@ impl Connection {
     }
 
     /// Writes `cookies`, which are `Storage.setCookies` parameters.
-    pub async fn set_cookies(&mut self, cookies: Vec<Value>) -> Result<()> {
+    pub(crate) async fn set_cookies(&mut self, cookies: Vec<Value>) -> Result<()> {
         self.call("Storage.setCookies", json!({"cookies": cookies}))
             .await
             .map(|_| ())
@@ -144,7 +144,7 @@ impl Connection {
 }
 
 /// Loads `url` in the first tab of the Chromium on `port`.
-pub async fn navigate_first_tab(port: u16, url: &str) -> Result<()> {
+pub(crate) async fn navigate_first_tab(port: u16, url: &str) -> Result<()> {
     let navigate = async {
         let socket_url = loop {
             let tabs = http_get(port, "/json/list").await?;

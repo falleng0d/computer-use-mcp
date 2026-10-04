@@ -8,14 +8,14 @@ use crate::keys;
 
 /// Press or release of a mouse button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Edge {
+pub(crate) enum Edge {
     Press,
     Release,
 }
 
 /// An input the X server can take directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Input {
+pub(crate) enum Input {
     Move(Point),
     Click {
         at: Point,
@@ -40,7 +40,7 @@ pub enum Input {
 
 /// One unit of work on a screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Step {
+pub(crate) enum Step {
     Input(Input),
     Wait(Duration),
     Focus {
@@ -65,7 +65,7 @@ fn check_point(point: Point, size: ScreenSize, number: usize) -> Result<(), Stri
 
 /// Converts actions to steps. Fails before anything runs when a position is off the
 /// screen, a key or modifier name is unknown, or text holds a character with no key.
-pub fn plan(actions: &[Action], size: ScreenSize) -> Result<Vec<Step>, String> {
+pub(crate) fn plan(actions: &[Action], size: ScreenSize) -> Result<Vec<Step>, String> {
     actions
         .iter()
         .enumerate()
@@ -149,16 +149,16 @@ fn plan_one(number: usize, action: &Action, size: ScreenSize) -> Result<Step, St
 
 /// A top-level window as the window manager lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WindowInfo {
-    pub id: u32,
+pub(crate) struct WindowInfo {
+    pub(crate) id: u32,
     /// Instance and class from `WM_CLASS`.
-    pub class: Vec<String>,
-    pub title: String,
+    pub(crate) class: Vec<String>,
+    pub(crate) title: String,
 }
 
 impl WindowInfo {
     /// A short description for messages, such as `xterm: ~ (XTerm)`.
-    pub fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         match self.class.as_slice() {
             [] => format!("{:?}", self.title),
             [.., class] => format!("{:?} ({class})", self.title),
@@ -168,7 +168,10 @@ impl WindowInfo {
 
 /// Picks the window that `application` names. A class equal to the name wins over a
 /// class or title that merely contains it. Ties go to the earliest window.
-pub fn pick_window<'a>(windows: &'a [WindowInfo], application: &str) -> Option<&'a WindowInfo> {
+pub(crate) fn pick_window<'a>(
+    windows: &'a [WindowInfo],
+    application: &str,
+) -> Option<&'a WindowInfo> {
     let wanted = application.trim().to_lowercase();
     let exact = windows.iter().find(|window| {
         window

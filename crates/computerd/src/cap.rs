@@ -3,21 +3,21 @@
 use std::collections::VecDeque;
 
 /// Bytes kept from the start of a stream.
-pub const HEAD_BYTES: usize = 15_000;
+pub(crate) const HEAD_BYTES: usize = 15_000;
 
 /// Bytes kept from the end of a stream.
-pub const TAIL_BYTES: usize = 15_000;
+pub(crate) const TAIL_BYTES: usize = 15_000;
 
 /// Reads text of any length, in chunks, while holding at most [`HEAD_BYTES`] + [`TAIL_BYTES`] of it.
 #[derive(Debug, Default)]
-pub struct Capture {
+pub(crate) struct Capture {
     head: Vec<u8>,
     tail: VecDeque<u8>,
     total: u64,
 }
 
 impl Capture {
-    pub fn push(&mut self, mut chunk: &[u8]) {
+    pub(crate) fn push(&mut self, mut chunk: &[u8]) {
         self.total += chunk.len() as u64;
         if self.head.len() < HEAD_BYTES {
             let (keep, rest) = chunk.split_at(chunk.len().min(HEAD_BYTES - self.head.len()));
@@ -33,7 +33,7 @@ impl Capture {
     /// The text read so far. Invalid UTF-8 becomes U+FFFD. When bytes were dropped, a marker
     /// says how many. A character cut by the marker is dropped whole.
     #[must_use]
-    pub fn into_text(self) -> String {
+    pub(crate) fn into_text(self) -> String {
         let kept = (self.head.len() + self.tail.len()) as u64;
         let tail = self.tail.into_iter().collect::<Vec<_>>();
         if self.total == kept {

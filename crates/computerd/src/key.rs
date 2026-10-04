@@ -42,7 +42,7 @@ fn config_dir(home: &Path) -> PathBuf {
 }
 
 /// Where `Xvnc` reads the obfuscated password.
-pub fn vnc_password_path(home: &Path) -> PathBuf {
+pub(crate) fn vnc_password_path(home: &Path) -> PathBuf {
     config_dir(home).join(VNC_FILE)
 }
 
@@ -60,7 +60,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Loads the key from home, or makes and stores one on a fresh home, then writes the `Xvnc` password file.
-pub fn ensure(home: &Path) -> Result<String> {
+pub(crate) fn ensure(home: &Path) -> Result<String> {
     let dir = config_dir(home);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let key_path = dir.join(KEY_FILE);

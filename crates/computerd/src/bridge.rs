@@ -18,7 +18,7 @@ use tracing::warn;
 
 use crate::sessions::Sessions;
 
-pub const PORT: u16 = 7071;
+pub(crate) const PORT: u16 = 7071;
 const MAX_LINE_BYTES: u64 = 4096;
 /// Requests handled at once. Others wait in the listen queue.
 const MAX_REQUESTS: usize = 16;
@@ -30,14 +30,14 @@ const COMMAND: &str = "browser";
 
 /// A request for the browser of one screen.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Request {
-    pub screen: u8,
-    pub url: Option<String>,
+pub(crate) struct Request {
+    pub(crate) screen: u8,
+    pub(crate) url: Option<String>,
 }
 
 impl Request {
     /// The request as it goes over the wire, without the line end.
-    pub fn line(&self) -> String {
+    fn line(&self) -> String {
         match &self.url {
             Some(url) => format!("{COMMAND} {} {url}", self.screen),
             None => format!("{COMMAND} {}", self.screen),
@@ -49,7 +49,7 @@ impl Request {
     /// # Errors
     ///
     /// Fails when the line is not `browser <screen> [url]` with a screen from 1 to 16.
-    pub fn parse(line: &str) -> Result<Self, String> {
+    fn parse(line: &str) -> Result<Self, String> {
         let mut parts = line.trim().splitn(3, ' ');
         let command = parts.next().unwrap_or_default();
         let screen = parts
@@ -73,7 +73,7 @@ impl Request {
 }
 
 /// Answers requests until `stop` is cancelled. Requests being handled are dropped then.
-pub async fn serve(listener: TcpListener, sessions: Sessions, stop: CancellationToken) {
+pub(crate) async fn serve(listener: TcpListener, sessions: Sessions, stop: CancellationToken) {
     let mut handlers = JoinSet::new();
     let slots = Arc::new(Semaphore::new(MAX_REQUESTS));
     loop {
@@ -131,7 +131,7 @@ async fn answer(stream: TcpStream, sessions: Sessions) {
 /// # Errors
 ///
 /// Fails when `computerd` cannot be reached or answers with an error.
-pub async fn ask(request: &Request) -> Result<()> {
+pub(crate) async fn ask(request: &Request) -> Result<()> {
     let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(("127.0.0.1", PORT)))
         .await
         .context("connecting to computerd timed out")?

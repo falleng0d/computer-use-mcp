@@ -27,7 +27,7 @@ use crate::{
     x11::Capturer,
 };
 
-pub const XVNC_FIRST_PORT: u16 = 5900;
+pub(crate) const XVNC_FIRST_PORT: u16 = 5900;
 const FLUXBOX_INIT: &str = "/etc/computerd/fluxbox-init";
 const X_SOCKET_DIR: &str = "/tmp/.X11-unix";
 const X_READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,7 +51,7 @@ const STEP_GAP: Duration = Duration::from_millis(30);
 
 /// Why a call on a screen failed.
 #[derive(Debug, thiserror::Error)]
-pub enum ScreenError {
+pub(crate) enum ScreenError {
     /// The request cannot be run as given. The screen is fine.
     #[error("{0}")]
     Rejected(String),
@@ -80,7 +80,7 @@ impl ScreenError {
 }
 
 /// Removes lock and socket files that a killed X server left behind.
-pub fn clean_stale_x_files() {
+pub(crate) fn clean_stale_x_files() {
     for number in FIRST_SCREEN..=LAST_SCREEN {
         let _ = std::fs::remove_file(lock_path(number));
         let _ = std::fs::remove_file(socket_path(number));
@@ -186,7 +186,7 @@ impl Processes {
 }
 
 /// One X display with its window manager and capture connection.
-pub struct Screen {
+pub(crate) struct Screen {
     _lease: Lease,
     number: u8,
     size: ScreenSize,
@@ -207,7 +207,7 @@ struct Source {
 
 impl Screen {
     /// Starts `Xvnc` and Fluxbox on the leased number and waits until both are usable.
-    pub async fn open(lease: Lease, size: ScreenSize) -> Result<Self> {
+    pub(crate) async fn open(lease: Lease, size: ScreenSize) -> Result<Self> {
         let number = lease.number();
         let mut processes = Processes::start_xvnc(number, size)?;
         match Self::bring_up(&mut processes, number, size).await {
@@ -269,16 +269,16 @@ impl Screen {
     }
 
     /// Fails when `Xvnc` or Fluxbox has exited.
-    pub fn check_alive(&mut self) -> Result<()> {
+    pub(crate) fn check_alive(&mut self) -> Result<()> {
         self.processes.check_alive()
     }
 
-    pub fn number(&self) -> u8 {
+    pub(crate) fn number(&self) -> u8 {
         self.number
     }
 
     /// Captures the screen. The image is left out when the session already has this frame.
-    pub async fn observe(&mut self) -> Result<Observation> {
+    pub(crate) async fn observe(&mut self) -> Result<Observation> {
         let source = Arc::clone(&self.source);
         let size = self.size;
         tokio::task::spawn_blocking(move || capture(&source, size))
@@ -289,7 +289,11 @@ impl Screen {
     /// Runs a batch of actions in order, then takes the closing screenshot when asked.
     ///
     /// Nothing runs when the batch is invalid or repeats a batch that already changed nothing.
-    pub async fn act(&mut self, request: ActRequest, cwd: &Path) -> Result<ActReply, ScreenError> {
+    pub(crate) async fn act(
+        &mut self,
+        request: ActRequest,
+        cwd: &Path,
+    ) -> Result<ActReply, ScreenError> {
         let steps = plan::plan(&request.actions, self.size).map_err(ScreenError::Rejected)?;
         let inputs: Vec<Input> = steps
             .iter()
@@ -416,7 +420,7 @@ impl Screen {
 
     /// Closes the browser, kills the applications, and stops the screen's processes.
     /// The screen number frees when `self` drops.
-    pub async fn close(mut self) {
+    pub(crate) async fn close(mut self) {
         info!(screen = self.number, "closing screen");
         if let Some(browser) = self.browser.take() {
             browser.close().await;
@@ -458,7 +462,11 @@ impl Screen {
     /// Opens a file or an http(s) URL, then returns a screenshot.
     ///
     /// Pages and files Chromium shows go to the screen's browser. Other files open with their default application.
-    pub async fn open_path(&mut self, input: &str, cwd: &Path) -> Result<Observation, ScreenError> {
+    pub(crate) async fn open_path(
+        &mut self,
+        input: &str,
+        cwd: &Path,
+    ) -> Result<Observation, ScreenError> {
         let target =
             browser::classify(input, cwd, &workdir::home_dir()).map_err(ScreenError::Rejected)?;
         let settle = match target {
@@ -483,7 +491,7 @@ impl Screen {
     }
 
     /// Starts or raises an application, then returns a screenshot.
-    pub async fn launch_app(
+    pub(crate) async fn launch_app(
         &mut self,
         application: &str,
         uri: Option<&str>,
@@ -563,7 +571,7 @@ impl Screen {
 
     /// Opens a page in the screen's browser, or just raises it without one. `input` is an http(s)
     /// URL or a file the browser shows, and a relative path starts at `cwd`.
-    pub async fn show_in_browser(
+    pub(crate) async fn show_in_browser(
         &mut self,
         input: Option<&str>,
         cwd: &Path,

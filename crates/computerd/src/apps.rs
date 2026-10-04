@@ -23,16 +23,16 @@ const TERMINAL: &str = "xterm";
 
 /// An installed application that has a `.desktop` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DesktopEntry {
+struct DesktopEntry {
     /// File name without `.desktop`.
-    pub id: String,
-    pub name: String,
-    pub exec: String,
+    id: String,
+    name: String,
+    exec: String,
 }
 
 /// What an application name resolved to.
 #[derive(Debug, PartialEq, Eq)]
-pub enum App {
+pub(crate) enum App {
     /// The screen's own Chromium.
     Browser,
     Terminal,
@@ -44,7 +44,7 @@ pub enum App {
 }
 
 /// Folders that hold `.desktop` files, system ones first.
-pub fn desktop_dirs(home: &Path) -> Vec<PathBuf> {
+fn desktop_dirs(home: &Path) -> Vec<PathBuf> {
     vec![
         PathBuf::from("/usr/share/applications"),
         PathBuf::from("/usr/local/share/applications"),
@@ -53,7 +53,7 @@ pub fn desktop_dirs(home: &Path) -> Vec<PathBuf> {
 }
 
 /// Reads one `.desktop` file. Entries that are hidden or are not applications give `None`.
-pub fn parse_desktop(id: &str, text: &str) -> Option<DesktopEntry> {
+fn parse_desktop(id: &str, text: &str) -> Option<DesktopEntry> {
     let mut in_entry = false;
     let (mut name, mut exec, mut kind) = (None, None, None);
     for line in text.lines().map(str::trim) {
@@ -86,7 +86,7 @@ pub fn parse_desktop(id: &str, text: &str) -> Option<DesktopEntry> {
 }
 
 /// Splits an `Exec=` value into arguments. Field codes become `uri`, or vanish without one.
-pub fn exec_argv(exec: &str, uri: Option<&str>) -> Vec<String> {
+fn exec_argv(exec: &str, uri: Option<&str>) -> Vec<String> {
     let mut words: Vec<String> = Vec::new();
     let mut word = String::new();
     let mut started = false;
@@ -153,7 +153,7 @@ fn fill_field_codes(word: &str, uri: Option<&str>) -> Option<String> {
 
 /// Resolves an application name. Known names come first, then `.desktop` entries by file name or
 /// display name, then programs found by `on_path`, then absolute paths.
-pub fn resolve(
+fn resolve(
     name: &str,
     entries: &[DesktopEntry],
     uri: Option<&str>,
@@ -199,12 +199,12 @@ pub fn resolve(
 }
 
 /// The command that starts a terminal.
-pub fn terminal_argv() -> Vec<String> {
+pub(crate) fn terminal_argv() -> Vec<String> {
     vec![TERMINAL.to_owned()]
 }
 
 /// Whether `name` is an executable file in a folder of `path_var`, or an executable path itself.
-pub fn executable_exists(name: &str, path_var: Option<&std::ffi::OsStr>) -> bool {
+fn executable_exists(name: &str, path_var: Option<&std::ffi::OsStr>) -> bool {
     let is_file = |path: &Path| path.is_file();
     if name.contains('/') {
         return is_file(Path::new(name));
@@ -216,7 +216,7 @@ pub fn executable_exists(name: &str, path_var: Option<&std::ffi::OsStr>) -> bool
 }
 
 /// Resolves an application name using the installed `.desktop` files and the daemon's `PATH`.
-pub fn find_app(name: &str, uri: Option<&str>, home: &Path) -> Option<App> {
+pub(crate) fn find_app(name: &str, uri: Option<&str>, home: &Path) -> Option<App> {
     let mut entries = Vec::new();
     for dir in desktop_dirs(home) {
         let Ok(files) = std::fs::read_dir(dir) else {
@@ -247,7 +247,7 @@ pub fn find_app(name: &str, uri: Option<&str>, home: &Path) -> Option<App> {
 /// Starts `argv` on screen `display` in its own process group, in `cwd` or home when that is gone.
 ///
 /// The program is killed when the returned child is dropped.
-pub fn spawn(argv: &[String], cwd: &Path, display: u8) -> std::io::Result<Child> {
+pub(crate) fn spawn(argv: &[String], cwd: &Path, display: u8) -> std::io::Result<Child> {
     let dir = if cwd.is_dir() {
         cwd.to_path_buf()
     } else {
@@ -270,14 +270,14 @@ pub fn spawn(argv: &[String], cwd: &Path, display: u8) -> std::io::Result<Child>
 
 /// Kills the process group an application was started in.
 #[cfg(target_os = "linux")]
-pub fn kill_group(app: &mut Child) {
+pub(crate) fn kill_group(app: &mut Child) {
     if let Some(group) = app.id() {
         proc::kill_group(group);
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn kill_group(app: &mut Child) {
+pub(crate) fn kill_group(app: &mut Child) {
     let _ = app.start_kill();
 }
 

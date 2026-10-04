@@ -22,7 +22,7 @@ mod input;
 
 const DEPTH: u8 = 24;
 
-pub struct Capturer {
+pub(crate) struct Capturer {
     conn: RustConnection,
     root: Window,
     size: ScreenSize,
@@ -51,7 +51,7 @@ fn atom(conn: &RustConnection, name: &str) -> Result<u32> {
 
 impl Capturer {
     /// Connects to `display` (for example `:1`) and sets up shared memory and damage tracking.
-    pub fn connect(display: &str, size: ScreenSize) -> Result<Self> {
+    pub(crate) fn connect(display: &str, size: ScreenSize) -> Result<Self> {
         let (conn, screen_num) = RustConnection::connect(Some(display))
             .with_context(|| format!("connecting to display {display}"))?;
         let screen = &conn.setup().roots[screen_num];
@@ -123,7 +123,7 @@ impl Capturer {
     }
 
     /// True once a window manager has announced itself on the root window.
-    pub fn window_manager_ready(&self) -> Result<bool> {
+    pub(crate) fn window_manager_ready(&self) -> Result<bool> {
         let reply = self
             .conn
             .get_property(
@@ -139,7 +139,7 @@ impl Capturer {
     }
 
     /// Returns whether the screen changed since the previous call, and re-arms the watch.
-    pub fn take_damage(&self) -> Result<bool> {
+    pub(crate) fn take_damage(&self) -> Result<bool> {
         // A reply arrives after every event sent before it, so this drains all pending damage.
         self.conn.get_input_focus()?.reply()?;
         let mut damaged = false;
@@ -152,7 +152,7 @@ impl Capturer {
         Ok(damaged)
     }
 
-    pub fn cursor(&self) -> Result<Cursor> {
+    pub(crate) fn cursor(&self) -> Result<Cursor> {
         let pointer = self.conn.query_pointer(self.root)?.reply()?;
         Ok(Cursor {
             x: pointer.root_x,
@@ -161,7 +161,7 @@ impl Capturer {
     }
 
     /// Title of the focused window, or an empty string when there is none or it has no title.
-    pub fn active_window_title(&self) -> String {
+    pub(crate) fn active_window_title(&self) -> String {
         self.try_active_window_title().unwrap_or_default()
     }
 
@@ -204,7 +204,7 @@ impl Capturer {
     }
 
     /// Copies the whole screen into shared memory and returns it as BGRX bytes.
-    pub fn grab(&mut self) -> Result<&[u8]> {
+    pub(crate) fn grab(&mut self) -> Result<&[u8]> {
         let reply = self
             .conn
             .shm_get_image(

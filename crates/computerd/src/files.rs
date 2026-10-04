@@ -90,7 +90,11 @@ fn rfc3339(time: SystemTime) -> Option<String> {
 /// # Errors
 ///
 /// Fails with a message for the agent when the path is missing, unreadable, or not a folder.
-pub fn list(cwd: &Path, home: &Path, request: &ListFilesRequest) -> Result<ListFilesReply, String> {
+pub(crate) fn list(
+    cwd: &Path,
+    home: &Path,
+    request: &ListFilesRequest,
+) -> Result<ListFilesReply, String> {
     let wanted = workdir::resolve(cwd, home, request.path.as_deref().unwrap_or("."));
     let dir = fs::canonicalize(&wanted).map_err(|error| io_message(&error, &wanted))?;
     if !dir.is_dir() {
@@ -135,7 +139,11 @@ pub fn list(cwd: &Path, home: &Path, request: &ListFilesRequest) -> Result<ListF
 ///
 /// Fails with a message for the agent when the path is missing, unreadable, a folder, other
 /// binary data, too big, or when `offset` or `limit` is out of range.
-pub fn read(cwd: &Path, home: &Path, request: &ReadFileRequest) -> Result<ReadFileReply, String> {
+pub(crate) fn read(
+    cwd: &Path,
+    home: &Path,
+    request: &ReadFileRequest,
+) -> Result<ReadFileReply, String> {
     let wanted = workdir::resolve(cwd, home, &request.path);
     let real = fs::canonicalize(&wanted).map_err(|error| io_message(&error, &wanted))?;
     let meta = fs::metadata(&real).map_err(|error| io_message(&error, &real))?;
@@ -248,7 +256,7 @@ fn window(
 ///
 /// Fails with a message for the agent when the content is too big, the path is a folder or
 /// cannot be created, or the system refuses.
-pub fn write(
+pub(crate) fn write(
     cwd: &Path,
     home: &Path,
     request: &WriteFileRequest,

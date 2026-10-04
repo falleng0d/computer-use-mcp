@@ -40,7 +40,7 @@ const MAX_FAILURES: u32 = 30;
 static SHARED: OnceLock<CookieSync> = OnceLock::new();
 
 /// The jar and the browsers that share it.
-pub struct CookieSync {
+pub(crate) struct CookieSync {
     state: Mutex<State>,
     /// Held while the jar is written, so two saves never share the temporary file.
     saving: tokio::sync::Mutex<()>,
@@ -78,12 +78,12 @@ fn now() -> f64 {
 }
 
 /// Where the jar lives in `home`.
-pub fn jar_path(home: &Path) -> PathBuf {
+pub(crate) fn jar_path(home: &Path) -> PathBuf {
     home.join(JAR_FILE)
 }
 
 /// Loads the jar and makes the sync available to browsers. Calling it twice keeps the first.
-pub async fn install(path: PathBuf) -> &'static CookieSync {
+pub(crate) async fn install(path: PathBuf) -> &'static CookieSync {
     let loaded = {
         let path = path.clone();
         tokio::task::spawn_blocking(move || load(&path)).await
@@ -106,7 +106,7 @@ pub async fn install(path: PathBuf) -> &'static CookieSync {
 }
 
 /// The installed sync, when `computerd` runs with one.
-pub fn shared() -> Option<&'static CookieSync> {
+pub(crate) fn shared() -> Option<&'static CookieSync> {
     SHARED.get()
 }
 
@@ -211,7 +211,7 @@ impl CookieSync {
     /// Starts sharing with the browser of screen `number`, giving it every cookie in the jar.
     ///
     /// Never fails. The browser still works when `DevTools` does not answer, it just shares nothing.
-    pub async fn attach(&self, number: u8, port: u16) {
+    pub(crate) async fn attach(&self, number: u8, port: u16) {
         let live = self.lock().jar.live(now());
         let loaded = live.len();
         let result = tokio::time::timeout(ATTACH_TIMEOUT, load_jar_into(live, port)).await;
@@ -246,7 +246,7 @@ impl CookieSync {
     }
 
     /// Stops sharing with the browser of screen `number` after one last read of its cookies.
-    pub async fn detach(&self, number: u8) {
+    pub(crate) async fn detach(&self, number: u8) {
         let Some(tracked) = self.lock().browsers.remove(&number) else {
             return;
         };
@@ -269,7 +269,7 @@ impl CookieSync {
     }
 
     /// Runs a pass every [`SYNC_INTERVAL`] until `stop` is cancelled, then saves the jar.
-    pub async fn run(&self, stop: CancellationToken) {
+    pub(crate) async fn run(&self, stop: CancellationToken) {
         loop {
             tokio::select! {
                 () = stop.cancelled() => break,

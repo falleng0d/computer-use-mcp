@@ -30,7 +30,7 @@ struct AppState {
     sessions: Sessions,
 }
 
-pub fn router(token: String, key: String, sessions: Sessions) -> Router {
+pub(crate) fn router(token: String, key: String, sessions: Sessions) -> Router {
     let state = AppState {
         token: token.into(),
         key: key.into(),

@@ -48,7 +48,7 @@ fn wheel_code(direction: Direction) -> u8 {
 
 impl Capturer {
     /// Sends one input.
-    pub fn perform(&self, input: &Input) -> Result<()> {
+    pub(crate) fn perform(&self, input: &Input) -> Result<()> {
         match input {
             Input::Move(at) => self.motion(*at)?,
             Input::Click { at, button } => {
@@ -214,7 +214,7 @@ impl Capturer {
 
     /// Fails when `inputs` hold a key or modifier the keyboard cannot produce, so the
     /// batch can be refused before any of it runs.
-    pub fn check_keys(&self, inputs: &[Input]) -> Result<()> {
+    pub(crate) fn check_keys(&self, inputs: &[Input]) -> Result<()> {
         let keymap = self.keymap()?;
         for input in inputs {
             match input {
@@ -236,7 +236,7 @@ impl Capturer {
     }
 
     /// Releases every mouse button that an earlier input pressed and did not release.
-    pub fn release_held(&self) -> Result<()> {
+    pub(crate) fn release_held(&self) -> Result<()> {
         let held: Vec<u8> = self.held_buttons.borrow().iter().copied().collect();
         let mut result = Ok(());
         for code in held {
@@ -246,7 +246,7 @@ impl Capturer {
     }
 
     /// Asks the window manager to raise and focus `window`.
-    pub fn activate(&self, window: u32) -> Result<()> {
+    pub(crate) fn activate(&self, window: u32) -> Result<()> {
         let event = ClientMessageEvent::new(
             32,
             window,
@@ -263,7 +263,7 @@ impl Capturer {
     }
 
     /// The top-level windows the window manager lists.
-    pub fn windows(&self) -> Result<Vec<WindowInfo>> {
+    pub(crate) fn windows(&self) -> Result<Vec<WindowInfo>> {
         let list = self
             .conn
             .get_property(
