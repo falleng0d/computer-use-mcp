@@ -9,6 +9,7 @@ const SELECTION_SETTLE_MS = 40;
 const XK_V = 0x76;
 const XK_CONTROL_L = 0xffe3;
 const XK_ALT_L = 0xffe9;
+const XK_SUPER_L = 0xffeb;
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 
 const el = (id) => document.getElementById(id);
@@ -101,34 +102,43 @@ function showClipboardNotice() {
   }, NOTICE_MS);
 }
 
-let pasteTimer = null;
+let paste = null;
 
 function cancelPaste() {
-  clearTimeout(pasteTimer);
-  pasteTimer = null;
+  if (paste) clearTimeout(paste.timer);
+  paste = null;
 }
 
 function isPasteShortcut(e) {
-  if (e.code !== 'KeyV' || e.altKey || e.shiftKey) return false;
+  const isV = e.key.toLowerCase() === 'v' || (e.code === 'KeyV' && /^\p{L}$/u.test(e.key) && !/^[a-z]$/i.test(e.key));
+  if (!isV || e.altKey || e.shiftKey) return false;
   return IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
 }
 
 let shortcutHeld = false;
 
 // Hands the host text to the screen, then sends Ctrl+V so the focused app
-// pastes it. Ctrl is pressed again in case it was released while the text was
-// being read, and released afterwards unless the user still holds the key.
-function finishPaste(text) {
-  cancelPaste();
-  const client = rfb;
-  if (!isUnlocked()) return;
+// pastes it. On macOS the screen sees Cmd as Alt or Super, so those are
+// released and Ctrl is pressed and released here. Elsewhere Ctrl is pressed
+// again in case it was released while the text was being read, and released
+// afterwards unless the user still holds the key.
+function finishPaste(current, text) {
+  clearTimeout(current.timer);
+  const { client } = current;
+  const alive = () => paste === current && rfb === client && isUnlocked();
+  if (current.sent || !alive()) return;
+  current.sent = true;
   if (text) client.clipboardPasteFrom(text);
-  setTimeout(() => {
-    if (rfb !== client || !isUnlocked()) return;
-    if (IS_MAC) client.sendKey(XK_ALT_L, 'MetaLeft', false);
+  current.timer = setTimeout(() => {
+    if (!alive()) return;
+    paste = null;
+    if (IS_MAC) {
+      client.sendKey(XK_ALT_L, 'MetaLeft', false);
+      client.sendKey(XK_SUPER_L, 'MetaRight', false);
+    }
     client.sendKey(XK_CONTROL_L, 'ControlLeft', true);
     client.sendKey(XK_V, 'KeyV');
-    if (!shortcutHeld) client.sendKey(XK_CONTROL_L, 'ControlLeft', false);
+    if (IS_MAC || !shortcutHeld) client.sendKey(XK_CONTROL_L, 'ControlLeft', false);
   }, text ? SELECTION_SETTLE_MS : 0);
 }
 
@@ -149,13 +159,16 @@ screenEl.addEventListener(
     shortcutHeld = IS_MAC ? e.metaKey : e.ctrlKey;
     if (!isUnlocked() || !isPasteShortcut(e)) return;
     e.stopPropagation();
-    if (e.repeat || pasteTimer !== null) return;
-    pasteTimer = setTimeout(async () => {
-      pasteTimer = null;
+    if (e.repeat || paste !== null) return;
+    const current = { client: rfb, timer: null };
+    paste = current;
+    current.timer = setTimeout(async () => {
       try {
-        finishPaste(await navigator.clipboard.readText());
+        const text = await navigator.clipboard.readText();
+        finishPaste(current, text);
       } catch (error) {
         console.debug('clipboard read failed', error);
+        if (paste === current) paste = null;
         showClipboardNotice();
       }
     }, PASTE_WAIT_MS);
@@ -166,9 +179,9 @@ screenEl.addEventListener(
 document.addEventListener(
   'paste',
   (e) => {
-    if (pasteTimer === null) return;
+    if (paste === null) return;
     e.preventDefault();
-    finishPaste(e.clipboardData?.getData('text/plain') ?? '');
+    finishPaste(paste, e.clipboardData?.getData('text/plain') ?? '');
   },
   true,
 );
