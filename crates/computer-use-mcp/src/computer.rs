@@ -35,6 +35,7 @@ const LOOPBACK: &str = "127.0.0.1";
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(30);
 const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(15);
 const ENDPOINT_RETRY: Duration = Duration::from_millis(250);
+const START_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 const PULL_TIMEOUT: Duration = Duration::from_mins(15);
 
 /// Names and host facts used when the computer is created.
@@ -459,7 +460,7 @@ impl Docked {
             Step::Reuse => {}
             Step::Start => {
                 info!(container = %name, "starting the computer");
-                self.start_container()
+                self.start_or_join()
                     .await
                     .map_err(|error| explain_start_error(error, false))?;
             }
@@ -708,7 +709,7 @@ impl Docked {
                 true
             }
         };
-        let Err(error) = self.start_container().await else {
+        let Err(error) = self.start_or_join().await else {
             return Ok(());
         };
         let explained = explain_start_error(error, made_here && !recreating);
@@ -722,6 +723,32 @@ impl Docked {
             .await;
         }
         Err(explained)
+    }
+
+    /// Starts the container. When the start is refused with a server error or a conflict because
+    /// another process is starting the same container, waits briefly for that start to finish and
+    /// treats a container that ends up running as started.
+    async fn start_or_join(&self) -> Result<()> {
+        let Err(error) = self.start_container().await else {
+            return Ok(());
+        };
+        if !(has_status(&error, 500) || is_conflict(&error)) {
+            return Err(error);
+        }
+        let started = tokio::time::Instant::now();
+        loop {
+            if let Some(found) = self.inspect().await?
+                && is_ours(&found)
+                && status_of(&found) == Some(ContainerStateStatusEnum::RUNNING)
+            {
+                info!(container = %self.settings.name, "another process started the computer");
+                return Ok(());
+            }
+            if started.elapsed() >= START_JOIN_TIMEOUT {
+                return Err(error);
+            }
+            tokio::time::sleep(ENDPOINT_RETRY).await;
+        }
     }
 
     async fn start_container(&self) -> Result<()> {
