@@ -28,8 +28,7 @@ const MAX_LINK_HOPS: usize = 40;
 const SNIFF_BYTES: usize = 8192;
 const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 const JPEG_MAGIC: &[u8] = b"\xFF\xD8\xFF";
-const SHELL_HINT: &str =
-    "Inspect it with the shell tool, for example `file <path>` or `od -c <path> | head`.";
+const SHELL_HINT: &str = "Inspect it with the shell tool, for example `file <path>` or `od -c <path> | head`, or copy it to the host with file_transfer.";
 
 /// What the bytes of a file say it is.
 #[derive(Debug, PartialEq, Eq)]
@@ -263,7 +262,7 @@ pub(crate) fn write(
 ) -> Result<WriteFileReply, String> {
     if request.content.len() > MAX_WRITE_BYTES {
         return Err(format!(
-            "the content is {} bytes, over the {MAX_WRITE_BYTES} byte limit for write_file. Write it in pieces or create it with the shell tool.",
+            "the content is {} bytes, over the {MAX_WRITE_BYTES} byte limit for write_file. Write it in pieces, create it with the shell tool, or copy it from the host with file_transfer.",
             request.content.len()
         ));
     }

@@ -8,6 +8,7 @@ mod open;
 mod server;
 mod settings;
 mod shell_result;
+mod transfer;
 mod upgrade;
 
 use anyhow::Context;

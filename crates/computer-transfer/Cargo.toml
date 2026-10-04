@@ -1,0 +1,26 @@
+[package]
+name = "computer-transfer"
+description = "Packs and unpacks file trees for transfers between the host and the computer."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+computer-protocol = { version = "0.2.0", path = "../computer-protocol" }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+serde_json = "1.0.151"
+tar = { version = "0.4.46", default-features = false }
+tokio = { version = "1.53.2", features = ["rt", "sync", "time", "macros"] }
+tokio-util = "0.7.19"
+uuid = { version = "1.27.0", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.2", features = ["test-util", "rt-multi-thread"] }

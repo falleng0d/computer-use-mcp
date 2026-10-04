@@ -17,7 +17,7 @@ git_release_enable = true
 git_release_name = "v{{ version }}"
 changelog_update = true
 changelog_path = "CHANGELOG.md"
-changelog_include = ["computerd", "computer-protocol"]
+changelog_include = ["computerd", "computer-protocol", "computer-transfer"]
 
 [changelog]
 body = """

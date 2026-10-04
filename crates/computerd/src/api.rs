@@ -2,17 +2,22 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Request, State},
-    http::{StatusCode, header::AUTHORIZATION},
+    body::Body,
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
+    http::{
+        StatusCode,
+        header::{AUTHORIZATION, CONTENT_TYPE},
+    },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use computer_protocol::{
-    ActReply, ActRequest, ApiError, CreateSession, Health, LaunchAppRequest, ListFilesReply,
-    ListFilesRequest, Observation, OpenPathRequest, OwnerId, PROTOCOL_VERSION, ReadFileReply,
-    ReadFileRequest, SCREEN_COUNT, SessionCreated, SessionId, SetCwdReply, SetCwdRequest,
-    ShellReply, ShellRequest, VERSION, ViewerInfo, WriteFileReply, WriteFileRequest,
+    ActReply, ActRequest, ApiError, CreateSession, DownloadRequest, Health, LaunchAppRequest,
+    ListFilesReply, ListFilesRequest, Observation, OpenPathRequest, OwnerId, PROTOCOL_VERSION,
+    ReadFileReply, ReadFileRequest, SCREEN_COUNT, SessionCreated, SessionId, SetCwdReply,
+    SetCwdRequest, ShellReply, ShellRequest, TransferReply, UploadQuery, VERSION, ViewerInfo,
+    WriteFileReply, WriteFileRequest,
 };
 use tracing::error;
 use uuid::Uuid;
@@ -56,6 +61,11 @@ pub(crate) fn router(token: String, key: String, sessions: Sessions) -> Router {
             "/sessions/{id}/files/write",
             post(write_file).layer(DefaultBodyLimit::max(MAX_WRITE_BODY_BYTES)),
         )
+        .route(
+            "/sessions/{id}/files/upload",
+            post(upload).layer(DefaultBodyLimit::disable()),
+        )
+        .route("/sessions/{id}/files/download", post(download))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state)
 }
@@ -204,6 +214,24 @@ async fn write_file(
     Json(request): Json<WriteFileRequest>,
 ) -> Result<Json<WriteFileReply>, SessionError> {
     state.sessions.write_file(&id, request).await.map(Json)
+}
+
+async fn upload(
+    State(state): State<AppState>,
+    Path(id): Path<SessionId>,
+    Query(query): Query<UploadQuery>,
+    body: Body,
+) -> Result<Json<TransferReply>, SessionError> {
+    state.sessions.upload(&id, query, body).await.map(Json)
+}
+
+async fn download(
+    State(state): State<AppState>,
+    Path(id): Path<SessionId>,
+    Json(request): Json<DownloadRequest>,
+) -> Result<Response, SessionError> {
+    let body = state.sessions.download(&id, request).await?;
+    Ok(([(CONTENT_TYPE, "application/x-tar")], body).into_response())
 }
 
 impl IntoResponse for SessionError {

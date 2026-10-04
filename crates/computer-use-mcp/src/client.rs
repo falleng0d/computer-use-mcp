@@ -2,11 +2,11 @@ use std::{num::NonZeroU32, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use computer_protocol::{
-    ActReply, ActRequest, ApiError, CreateSession, Health, LaunchAppRequest, ListFilesReply,
-    ListFilesRequest, Observation, OpenPathRequest, OwnerId, PROTOCOL_VERSION, ReadFileReply,
-    ReadFileRequest, ScreenSize, SessionCreated, SessionId, SessionTitle, SetCwdReply,
-    SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts, VERSION, ViewerInfo, WriteFileReply,
-    WriteFileRequest,
+    ActReply, ActRequest, ApiError, CreateSession, DownloadRequest, Health, LaunchAppRequest,
+    ListFilesReply, ListFilesRequest, Observation, OpenPathRequest, OwnerId, PROTOCOL_VERSION,
+    ReadFileReply, ReadFileRequest, ScreenSize, SessionCreated, SessionId, SessionTitle,
+    SetCwdReply, SetCwdRequest, ShellReply, ShellRequest, ShellTimeouts, TransferReply,
+    UploadQuery, VERSION, ViewerInfo, WriteFileReply, WriteFileRequest,
 };
 use reqwest::StatusCode;
 
@@ -21,6 +21,7 @@ const SHELL_MARGIN: Duration = Duration::from_secs(30);
 const FILE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Longest wait for `computerd` to start an application or a page, which includes starting the browser.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(100);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HEALTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const HEALTH_DEADLINE: Duration = Duration::from_secs(60);
 /// Longest wait for `computerd` when the MCP server is shutting down.
@@ -53,6 +54,8 @@ fn protocol_mismatch(computer_protocol: u32, computer_version: &str, container: 
 
 pub(crate) struct Client {
     http: reqwest::Client,
+    /// Has no total timeout, since a transfer takes as long as its data does. Waits for data are bounded by the read timeout.
+    streaming: reqwest::Client,
     base: String,
     token: String,
 }
@@ -64,8 +67,15 @@ impl Client {
             .no_proxy()
             .build()
             .context("building the HTTP client")?;
+        let streaming = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(computer_transfer::pipe::STALL)
+            .no_proxy()
+            .build()
+            .context("building the HTTP client for transfers")?;
         Ok(Self {
             http,
+            streaming,
             base: format!("http://127.0.0.1:{}", endpoint.port),
             token: endpoint.token.clone(),
         })
@@ -355,6 +365,46 @@ impl Client {
     ) -> Result<WriteFileReply> {
         self.file_call(session, "write", request, "writing the file")
             .await
+    }
+
+    /// Sends a tar archive for the computer to unpack at `path`.
+    ///
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub(crate) async fn upload(
+        &self,
+        session: &SessionId,
+        query: &UploadQuery,
+        body: reqwest::Body,
+    ) -> Result<TransferReply> {
+        let response = self
+            .streaming
+            .post(format!("{}/sessions/{session}/files/upload", self.base))
+            .bearer_auth(&self.token)
+            .query(query)
+            .body(body)
+            .send()
+            .await
+            .context("sending the files to the computer failed, the computer may have ended the transfer because the session ended or it stopped")?;
+        read_reply(response, "reading the result of the transfer").await
+    }
+
+    /// Asks the computer for a tar archive of `path`. The archive is the response body.
+    ///
+    /// Fails with [`UnknownSession`] when `computerd` does not know the session.
+    pub(crate) async fn download(
+        &self,
+        session: &SessionId,
+        path: String,
+    ) -> Result<reqwest::Response> {
+        let response = self
+            .streaming
+            .post(format!("{}/sessions/{session}/files/download", self.base))
+            .bearer_auth(&self.token)
+            .json(&DownloadRequest { path })
+            .send()
+            .await
+            .context("asking the computer for the files")?;
+        check(response).await
     }
 
     async fn file_call<B: serde::Serialize, T: serde::de::DeserializeOwned>(

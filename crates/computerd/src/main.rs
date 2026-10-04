@@ -32,6 +32,7 @@ mod screen;
 mod sessions;
 #[cfg(target_os = "linux")]
 mod shm;
+mod transfer;
 mod viewer;
 mod workdir;
 #[cfg(target_os = "linux")]
