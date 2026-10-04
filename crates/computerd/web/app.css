@@ -25,6 +25,7 @@ body { display: flex; }
 #bar-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
 #bar-size { color: var(--muted); font-size: 12px; flex: none; }
 #bar-title:not(:empty)::before, #bar-size:not(:empty)::before { content: "\00b7"; margin-right: 8px; }
+#clip-notice { flex: none; padding: 3px 10px; border-radius: 999px; border: 1px solid #8a6d1f; background: #3a2f10; color: #ffe9a8; font-size: 12px; white-space: nowrap; }
 #lock-state { flex: none; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); font-size: 12px; white-space: nowrap; }
 #bar.unlocked #lock-state { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 #bar button { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }

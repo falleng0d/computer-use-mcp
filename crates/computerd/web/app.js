@@ -3,6 +3,13 @@ import RFB from '/novnc/core/rfb.js';
 const KEY_STORE = 'computerKey';
 const RETRY_MS = 2000;
 const FLASH_MS = 3000;
+const NOTICE_MS = 6000;
+const PASTE_WAIT_MS = 250;
+const SELECTION_SETTLE_MS = 40;
+const XK_V = 0x76;
+const XK_CONTROL_L = 0xffe3;
+const XK_ALT_L = 0xffe9;
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 
 const el = (id) => document.getElementById(id);
 const statusEl = el('status');
@@ -19,6 +26,7 @@ const lockState = el('lock-state');
 const lockBtn = el('lock');
 const lockLabel = el('lock-label');
 const bannerEl = el('banner');
+const clipNotice = el('clip-notice');
 
 let sessions = [];
 let selected = null;
@@ -74,12 +82,103 @@ function isUnlocked() {
 
 function setUnlocked(value) {
   unlocked = value && connected && rfb !== null;
+  if (!unlocked) cancelPaste();
   if (rfb) {
     rfb.viewOnly = !unlocked;
     if (unlocked) rfb.focus();
     else rfb.blur();
   }
   renderBar();
+}
+
+let noticeTimer = null;
+
+function showClipboardNotice() {
+  clipNotice.hidden = false;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => {
+    clipNotice.hidden = true;
+  }, NOTICE_MS);
+}
+
+let pasteTimer = null;
+
+function cancelPaste() {
+  clearTimeout(pasteTimer);
+  pasteTimer = null;
+}
+
+function isPasteShortcut(e) {
+  if (e.code !== 'KeyV' || e.altKey || e.shiftKey) return false;
+  return IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+}
+
+let shortcutHeld = false;
+
+// Hands the host text to the screen, then sends Ctrl+V so the focused app
+// pastes it. Ctrl is pressed again in case it was released while the text was
+// being read, and released afterwards unless the user still holds the key.
+function finishPaste(text) {
+  cancelPaste();
+  const client = rfb;
+  if (!isUnlocked()) return;
+  if (text) client.clipboardPasteFrom(text);
+  setTimeout(() => {
+    if (rfb !== client || !isUnlocked()) return;
+    if (IS_MAC) client.sendKey(XK_ALT_L, 'MetaLeft', false);
+    client.sendKey(XK_CONTROL_L, 'ControlLeft', true);
+    client.sendKey(XK_V, 'KeyV');
+    if (!shortcutHeld) client.sendKey(XK_CONTROL_L, 'ControlLeft', false);
+  }, text ? SELECTION_SETTLE_MS : 0);
+}
+
+// noVNC stops keydown events, so the page's own keydown listener runs first
+// (capture) and lets the browser's paste event happen. That event carries the
+// text without a permission prompt. The Clipboard API is the fallback.
+screenEl.addEventListener(
+  'keyup',
+  (e) => {
+    shortcutHeld = IS_MAC ? e.metaKey : e.ctrlKey;
+  },
+  true,
+);
+
+screenEl.addEventListener(
+  'keydown',
+  (e) => {
+    shortcutHeld = IS_MAC ? e.metaKey : e.ctrlKey;
+    if (!isUnlocked() || !isPasteShortcut(e)) return;
+    e.stopPropagation();
+    if (e.repeat || pasteTimer !== null) return;
+    pasteTimer = setTimeout(async () => {
+      pasteTimer = null;
+      try {
+        finishPaste(await navigator.clipboard.readText());
+      } catch (error) {
+        console.debug('clipboard read failed', error);
+        showClipboardNotice();
+      }
+    }, PASTE_WAIT_MS);
+  },
+  true,
+);
+
+document.addEventListener(
+  'paste',
+  (e) => {
+    if (pasteTimer === null) return;
+    e.preventDefault();
+    finishPaste(e.clipboardData?.getData('text/plain') ?? '');
+  },
+  true,
+);
+
+function copyToHost(text) {
+  if (!isUnlocked() || !text) return;
+  navigator.clipboard.writeText(text).catch((error) => {
+    console.debug('clipboard write failed', error);
+    showClipboardNotice();
+  });
 }
 
 function renderBar() {
@@ -184,6 +283,7 @@ function connect() {
     setUnlocked(false);
     render();
   });
+  client.addEventListener('clipboard', (e) => copyToHost(e.detail.text));
   client.addEventListener('securityfailure', () => {
     if (rfb !== client) return;
     showMessage('The VNC password was refused. Open the link from the computer logs again.', false);
