@@ -709,6 +709,10 @@ impl Docked {
                 true
             }
         };
+        if !made_here && self.wait_until_running().await? {
+            info!(container = %name, "another process started the computer");
+            return Ok(());
+        }
         let Err(error) = self.start_or_join().await else {
             return Ok(());
         };
@@ -725,30 +729,47 @@ impl Docked {
         Err(explained)
     }
 
-    /// Starts the container. When the start is refused with a server error or a conflict because
-    /// another process is starting the same container, waits briefly for that start to finish and
-    /// treats a container that ends up running as started.
+    /// Whether our container runs. Docker Desktop for Windows loses the published ports of a
+    /// running container when a second start call reaches it, so a container that already runs
+    /// must never be started again.
+    async fn is_running(&self) -> Result<bool> {
+        Ok(self.inspect().await?.is_some_and(|found| {
+            is_ours(&found) && status_of(&found) == Some(ContainerStateStatusEnum::RUNNING)
+        }))
+    }
+
+    /// Polls until the container runs, for up to `START_JOIN_TIMEOUT`.
+    async fn wait_until_running(&self) -> Result<bool> {
+        let started = tokio::time::Instant::now();
+        loop {
+            if self.is_running().await? {
+                return Ok(true);
+            }
+            if started.elapsed() >= START_JOIN_TIMEOUT {
+                return Ok(false);
+            }
+            tokio::time::sleep(ENDPOINT_RETRY).await;
+        }
+    }
+
+    /// Starts the container unless it already runs. When the start is refused with a server error
+    /// or a conflict because another process is starting the same container, waits briefly for
+    /// that start to finish and treats a container that ends up running as started.
     async fn start_or_join(&self) -> Result<()> {
+        if self.is_running().await? {
+            return Ok(());
+        }
         let Err(error) = self.start_container().await else {
             return Ok(());
         };
         if !(has_status(&error, 500) || is_conflict(&error)) {
             return Err(error);
         }
-        let started = tokio::time::Instant::now();
-        loop {
-            if let Some(found) = self.inspect().await?
-                && is_ours(&found)
-                && status_of(&found) == Some(ContainerStateStatusEnum::RUNNING)
-            {
-                info!(container = %self.settings.name, "another process started the computer");
-                return Ok(());
-            }
-            if started.elapsed() >= START_JOIN_TIMEOUT {
-                return Err(error);
-            }
-            tokio::time::sleep(ENDPOINT_RETRY).await;
+        if self.wait_until_running().await? {
+            info!(container = %self.settings.name, "another process started the computer");
+            return Ok(());
         }
+        Err(error)
     }
 
     async fn start_container(&self) -> Result<()> {
