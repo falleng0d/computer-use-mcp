@@ -5,10 +5,14 @@
 
 use std::{
     collections::BTreeMap,
+    fs::{DirEntry, FileType},
     hash::{DefaultHasher, Hash, Hasher},
     io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -19,14 +23,19 @@ const SCRATCH_DIR: &str = "/tmp/computer-use/chromium";
 const DISCARD_TRIES: u32 = 10;
 const DISCARD_WAIT: Duration = Duration::from_millis(300);
 const PREFERENCES: &str = "Default/Preferences";
+const LOCK: &str = "LOCK";
 
-/// Files, relative to the profile folder, that move between profiles. The files of a group move
-/// together, and a file that is missing from the source is removed from the target.
+/// Entries, relative to the profile folder, that move between profiles. The entries of a group
+/// move together, and an entry that is missing from the source is removed from the target.
 ///
 /// `Preferences` moves without its extension records. They list installed extensions while the
 /// extension files stay behind, and a clone that claimed an extension was installed would never
 /// install it again.
-const GROUPS: [&[&str]; 4] = [
+///
+/// A folder moves with everything in it except `LOCK` files and symlinks. The 1Password
+/// entries carry the extension's saved account and encrypted vault cache, so a new screen opens
+/// at the unlock prompt.
+const GROUPS: [&[&str]; 5] = [
     &["Default/Bookmarks"],
     &[PREFERENCES],
     &[
@@ -40,6 +49,11 @@ const GROUPS: [&[&str]; 4] = [
         "Default/Web Data-journal",
         "Default/Web Data-wal",
         "Default/Web Data-shm",
+    ],
+    &[
+        "Default/Local Extension Settings/aeblfdkhhhdcdjpifhhbdiojplfjncoa",
+        "Default/IndexedDB/chrome-extension_aeblfdkhhhdcdjpifhhbdiojplfjncoa_0.indexeddb.leveldb",
+        "Default/IndexedDB/chrome-extension_aeblfdkhhhdcdjpifhhbdiojplfjncoa_0.indexeddb.blob",
     ],
 ];
 
@@ -81,12 +95,47 @@ fn remove_key(fields: &mut serde_json::Map<String, Value>, key: &str) {
 fn fingerprint(dir: &Path, group: &[&str]) -> u64 {
     let mut hasher = DefaultHasher::new();
     for name in group {
-        if let Ok(bytes) = std::fs::read(dir.join(name)) {
-            name.hash(&mut hasher);
-            bytes.hash(&mut hasher);
+        let path = dir.join(name);
+        if let Some(kind) = kind(&path) {
+            hash_entry(&path, kind, Path::new(name), &mut hasher);
         }
     }
     hasher.finish()
+}
+
+fn hash_entry(path: &Path, kind: FileType, label: &Path, hasher: &mut DefaultHasher) {
+    if kind.is_dir() {
+        for entry in children(path).unwrap_or_default() {
+            if let Ok(kind) = entry.file_type() {
+                hash_entry(&entry.path(), kind, &label.join(entry.file_name()), hasher);
+            }
+        }
+    } else if kind.is_file()
+        && let Ok(bytes) = std::fs::read(path)
+    {
+        label.hash(hasher);
+        bytes.hash(hasher);
+    }
+}
+
+/// What `path` itself is, without following a symlink.
+fn kind(path: &Path) -> Option<FileType> {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|metadata| metadata.file_type())
+}
+
+/// A folder's entries in name order, without `LOCK` files.
+fn children(dir: &Path) -> io::Result<Vec<DirEntry>> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_name() != LOCK {
+            found.push(entry);
+        }
+    }
+    found.sort_by_key(DirEntry::file_name);
+    Ok(found)
 }
 
 fn unique(prefix: &str) -> String {
@@ -98,14 +147,18 @@ fn unique(prefix: &str) -> String {
     )
 }
 
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.to_path_buf().into_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
 /// Copies one file whole or not at all, going through a temporary name.
 fn copy_file(from: &Path, to: &Path, tag: &str) -> io::Result<()> {
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut temporary = to.to_path_buf().into_os_string();
-    temporary.push(format!(".tmp-{tag}"));
-    let temporary = PathBuf::from(temporary);
+    let temporary = with_suffix(to, &format!(".tmp-{tag}"));
     if from.ends_with(PREFERENCES) {
         let Some(stripped) = strip_preferences(&std::fs::read(from)?) else {
             return Ok(());
@@ -121,23 +174,86 @@ fn copy_file(from: &Path, to: &Path, tag: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Copies one group from `from` to `to`. Nothing changes when `from` has none of its files.
-fn copy_group(from: &Path, to: &Path, group: &[&str], tag: &str) -> io::Result<()> {
-    if !group.iter().any(|name| from.join(name).is_file()) {
-        return Ok(());
-    }
-    for name in group {
-        let source = from.join(name);
-        if source.is_file() {
-            copy_file(&source, &to.join(name), tag)?;
-        } else {
-            match std::fs::remove_file(to.join(name)) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-                _ => {}
-            }
+/// Copies a folder's files and subfolders. Symlinks stay behind, so a link can't loop or pull in
+/// files from outside the profile.
+fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in children(from)? {
+        let (kind, target) = (entry.file_type()?, to.join(entry.file_name()));
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), target)?;
         }
     }
     Ok(())
+}
+
+/// Replaces the folder `to` with a copy of `from`. The old folder is moved aside first, so a
+/// reader sees the old folder, no folder for a moment, or the new one, never a half-copied one.
+fn copy_dir(from: &Path, to: &Path, tag: &str) -> io::Result<()> {
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let (staging, old) = (
+        with_suffix(to, &format!(".tmp-{tag}")),
+        with_suffix(to, &format!(".old-{tag}")),
+    );
+    let _ = std::fs::remove_dir_all(&staging);
+    let _ = std::fs::remove_dir_all(&old);
+    if let Err(error) = copy_tree(from, &staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    let moved_aside = kind(to).is_some();
+    if moved_aside && let Err(error) = std::fs::rename(to, &old) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&staging, to) {
+        if moved_aside {
+            let _ = std::fs::rename(&old, to);
+        }
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    let _ = std::fs::remove_dir_all(&old);
+    Ok(())
+}
+
+fn remove_entry(path: &Path) -> io::Result<()> {
+    let removed = match kind(path) {
+        Some(kind) if kind.is_dir() => std::fs::remove_dir_all(path),
+        Some(_) => std::fs::remove_file(path),
+        None => return Ok(()),
+    };
+    match removed {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// Copies one group from `from` to `to`. Nothing changes when `from` has none of its entries.
+fn copy_group(from: &Path, to: &Path, group: &[&str], tag: &str) -> io::Result<()> {
+    if group.iter().all(|name| kind(&from.join(name)).is_none()) {
+        return Ok(());
+    }
+    for name in group {
+        let (source, target) = (from.join(name), to.join(name));
+        match kind(&source) {
+            Some(kind) if kind.is_dir() => copy_dir(&source, &target, tag)?,
+            Some(kind) if kind.is_file() => copy_file(&source, &target, tag)?,
+            _ => remove_entry(&target)?,
+        }
+    }
+    Ok(())
+}
+
+/// Held while reading or writing the template, so a clone never copies a folder halfway through
+/// another screen's save.
+fn template_lock() -> MutexGuard<'static, ()> {
+    static TEMPLATE: Mutex<()> = Mutex::new(());
+    TEMPLATE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Creates an empty template when home has none. The template appears whole, or another start
@@ -157,6 +273,7 @@ fn ensure_template(home: &Path) -> io::Result<()> {
 
 /// Fills a scratch profile with the template's shared files.
 pub(crate) fn clone_template(home: &Path, scratch: &Path) -> io::Result<Baseline> {
+    let _template = template_lock();
     ensure_template(home)?;
     let template = template_dir(home);
     let mut baseline = Baseline::new();
@@ -178,6 +295,7 @@ pub(crate) fn save_to_template(
     number: u8,
     baseline: &Baseline,
 ) -> io::Result<()> {
+    let _template = template_lock();
     let template = template_dir(home);
     for (index, group) in GROUPS.iter().enumerate() {
         if baseline.get(&index) != Some(&fingerprint(scratch, group)) {
@@ -337,6 +455,57 @@ mod tests {
         );
         std::fs::remove_dir_all(&home).unwrap();
         std::fs::remove_dir_all(&scratch).unwrap();
+    }
+
+    #[test]
+    fn extension_folders_travel_whole_without_lock_files_and_replace_the_old_folder() {
+        const VAULT: &str = "Default/Local Extension Settings/aeblfdkhhhdcdjpifhhbdiojplfjncoa";
+        let (home, scratch) = (temp("home-dir"), temp("scratch-dir"));
+        let template = template_dir(&home);
+        write(&home, &format!("{TEMPLATE}/{VAULT}/000003.log"), "account");
+        write(&home, &format!("{TEMPLATE}/{VAULT}/LOCK"), "");
+        let baseline = clone_template(&home, &scratch).unwrap();
+        assert_eq!(
+            read(&scratch, &format!("{VAULT}/000003.log")).as_deref(),
+            Some("account")
+        );
+        assert_eq!(read(&scratch, &format!("{VAULT}/LOCK")), None);
+        std::fs::remove_file(scratch.join(VAULT).join("000003.log")).unwrap();
+        write(&scratch, &format!("{VAULT}/000005.ldb"), "vault");
+        save_to_template(&home, &scratch, 1, &baseline).unwrap();
+        let saved: Vec<_> = std::fs::read_dir(template.join(VAULT))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(saved, vec!["000005.ldb".to_owned()]);
+        let beside: Vec<_> = std::fs::read_dir(template.join(VAULT).parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(beside, vec!["aeblfdkhhhdcdjpifhhbdiojplfjncoa".to_owned()]);
+        std::fs::remove_dir_all(&home).unwrap();
+        std::fs::remove_dir_all(&scratch).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_in_an_extension_folder_stay_behind() {
+        const VAULT: &str = "Default/Local Extension Settings/aeblfdkhhhdcdjpifhhbdiojplfjncoa";
+        let (home, scratch, outside) = (temp("home-link"), temp("scratch-link"), temp("outside"));
+        write(&outside, "secret", "outside");
+        let baseline = clone_template(&home, &scratch).unwrap();
+        write(&scratch, &format!("{VAULT}/000003.log"), "vault");
+        std::os::unix::fs::symlink("..", scratch.join(VAULT).join("loop")).unwrap();
+        std::os::unix::fs::symlink(&outside, scratch.join(VAULT).join("outside")).unwrap();
+        save_to_template(&home, &scratch, 1, &baseline).unwrap();
+        let saved: Vec<_> = std::fs::read_dir(template_dir(&home).join(VAULT))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(saved, vec!["000003.log".to_owned()]);
+        for dir in [&home, &scratch, &outside] {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]
