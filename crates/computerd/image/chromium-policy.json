@@ -8,6 +8,14 @@
       "installation_mode": "normal_installed",
       "toolbar_pin": "force_pinned",
       "update_url": "https://clients2.google.com/service/update2/crx"
+    },
+    "mdjildafknihdffpkfmmpnpoiajfjnjd": {
+      "installation_mode": "normal_installed",
+      "update_url": "https://clients2.google.com/service/update2/crx"
+    },
+    "edibdbjcniadpccecjdfdjjppcpchdlm": {
+      "installation_mode": "normal_installed",
+      "update_url": "https://clients2.google.com/service/update2/crx"
     }
   },
   "DefaultBrowserSettingEnabled": false,
