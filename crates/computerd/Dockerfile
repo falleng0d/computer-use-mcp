@@ -8,7 +8,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked -p computerd \
     && cp target/release/computerd /usr/local/bin/computerd
 
-FROM ghcr.io/astral-sh/uv:0.12.23 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.5 AS uv
 
 FROM debian:trixie-slim AS aws
 RUN apt-get update \
